@@ -1,0 +1,103 @@
+# ============================================================
+#  通用忽略项
+# ============================================================
+
+# 操作系统生成的文件
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# 编辑器 / 临时文件
+*.swp
+*.tmp
+*~
+*.bak
+
+# 日志文件
+*.log
+
+# ============================================================
+#  Visual Studio 2022（Server 目录下的 C++ 工程）
+# ============================================================
+
+# Visual Studio 用户配置 / 缓存目录
+.vs/
+ipch/
+
+# 编译输出目录
+x64/
+Win32/
+x86/
+Debug/
+Release/
+debug/
+release/
+
+# 编译中间产物与输出
+*.obj
+*.pdb
+*.exe
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.recipe
+*.tlog
+*.lastbuildstate
+*.vcxproj.user
+*.sln.docstates
+
+# 第三方二进制依赖（MySQL 连接器 DLL，可自行重新下载）
+*.dll
+
+# 由 message.proto 生成的代码（可用 protoc 重新生成）
+message.pb.h
+message.pb.cc
+message.grpc.pb.h
+message.grpc.pb.cc
+
+# ============================================================
+#  Qt（MyChat_Qt 目录，qmake 工程）
+# ============================================================
+
+# Qt Creator 用户设置
+*.pro.user
+*.pro.user.*
+
+# qmake 构建产物
+build-*/
+Makefile
+Makefile.*
+*.o
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+.qmake.stash
+.qmake.cache
+.qtc_clangd/
+
+# ============================================================
+#  Node.js（Server/VerifyServer）
+# ============================================================
+
+# 依赖目录
+node_modules/
+
+# npm 日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ============================================================
+#  VS Code
+# ============================================================
+.vscode/
+
+# ============================================================
+#  敏感配置（包含数据库/Redis/邮箱密码，切勿上传）
+# ============================================================
+Server/**/config.ini
+config.json
