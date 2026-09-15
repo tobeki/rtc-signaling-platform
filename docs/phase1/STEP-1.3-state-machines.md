@@ -51,12 +51,33 @@
 | 事项 | 当前事实 | Step 1.3 目标设计 |
 | --- | --- | --- |
 | 会议状态修改位置 | 不存在 | 必须进入统一串行化入口，不由任何网络回调直接修改 |
-| 断线处理路径 | 网络回调直接调用 `ClearSession` 并直接改 `UserMgr` | 网络回调只捕获稳定上下文并投递 `SessionDisconnected` |
-| 线程模型 | 多个 Asio io_context 线程 + 1 个逻辑 worker 线程 | Meeting 变更只发生在串行化边界内 |
-| Session 状态表达 | 仅 `bool _b_close` | 正式 `connection_state` 枚举，见第 5 节 |
+| 断线处理路径 | 网络回调直接调用 `ClearSession` 并直接改 `UserMgr` | 网络回调只停止 transport ingress 并投递 `SessionDisconnected` |
+| 线程模型 | 多个 Asio io_context 线程 + 1 个逻辑 worker 线程 | Meeting 变更与正式 `connection_state` 变更只发生在串行化边界内 |
+| Transport 状态 | `bool _b_close` 与 socket 状态（网络线程视角） | 作为独立的 transport 事实，不与 Domain `connection_state` 混用 |
+| Domain Session 状态表达 | 不存在 | 正式 `connection_state` 枚举，仅由领域串行化入口修改，见第 5 节 |
 | `UserMgr` 映射 | `user_id → 单个 Session` | 会议关系由 Binding 表达，不依赖该映射的多 Session 能力 |
 
 本文只描述目标边界，不修改 `ClearSession`，也不要求现在为 Meeting 新建线程池。
+
+### 3.3 Transport liveness 与 Domain connection_state 的关系
+
+这是后续多处规则共同依赖的前提，必须在最前面固定：
+
+> **transport liveness（网络连接是否仍可收发）与 domain `connection_state` 是相关但不等价的两个事实。**
+
+| 对比项 | Transport liveness | Domain `connection_state` |
+| --- | --- | --- |
+| 事实含义 | 该连接是否还能接收新的网络输入 | 该连接的正式领域生命周期状态 |
+| 修改者 | Asio 网络线程（`CSession` 的 socket 状态、关闭标志或未来 transport flag） | 领域串行化入口 |
+| 判断依据 | socket 错误、对端关闭、协议失败 | 认证结果与领域终止流程的处理进度 |
+| 变化时机 | 网络事件发生时立即变化 | 由领域操作（含 `SessionDisconnected`）处理时变化 |
+
+由此得到两条本文反复使用的规则：
+
+1. 网络 callback 只修改 transport 事实，**不修改** Domain `connection_state`，也不修改任何 Meeting 聚合、Participant 或 Binding。
+2. 当 transport 已经终止、但 `SessionDisconnected` 尚未被领域线程处理时，**Domain Session record 仍保持其上一个正式状态**（对已认证连接即 `AUTHENTICATED`），其 Binding 也仍按该正式状态参与判定。此时网络层已经阻止该 `CSession` 产生新的输入，因此不存在"网络已断却仍能继续下达会议命令"的窗口。
+
+该规则消除了早期表达中的一处歧义：如果由网络线程直接把 Domain Session 置为 `CLOSING`，就会在领域线程处理 `SessionDisconnected` 之前产生"Participant 为 `ACTIVE` 而 `effective_binding_count` 为 0"的跨线程窗口。现在该窗口不存在（详见第 13.3 与 23.2 节）。
 
 ## 4. 状态建模原则
 
@@ -67,6 +88,48 @@
 5. **每条转换必须有唯一裁决者。** 每条转换只能由一个串行化入口内的用例产生，不存在两处代码各自修改同一状态。
 6. **过渡瞬间与稳定状态必须区分。** 可观测的外部状态遵循稳定不变量；处理过程中的临时中间态不得对外暴露。
 7. **事件跟随状态。** 领域事件在对应状态修改**成功之后**产生，且同一逻辑变化最多产生一次。
+8. **认证与权限优先于幂等。** 任何请求都必须先完成认证与权限判断，才允许用幂等结果作为响应（见 4.1 节）。
+9. **网络事实与领域事实分离。** transport 状态不由网络线程写入领域状态（见 3.3 节）。
+
+### 4.1 请求求值顺序
+
+对任何会议命令，求值顺序固定为：
+
+```text
+Authentication（Session 是否已完成认证）
+        ↓
+Authorization / caller identity（调用者身份与角色）
+        ↓
+Resource / state lookup（会议是否存在、是否在本节点、当前状态）
+        ↓
+Idempotent result evaluation（是否为重复请求、应返回何种幂等结果）
+        ↓
+Mutation（执行状态变更，或最终拒绝）
+```
+
+必须冻结的规则：
+
+> **幂等语义不能绕过认证与权限检查。**
+
+其含义是：一次请求即使最终会得到一个幂等结果（例如"会议已关闭"），也必须先完成认证与权限判断；只有当调用者确实具有执行该操作的权限时，才允许把幂等结果作为响应返回。
+
+不允许的形状：
+
+```text
+if (meeting.state == CLOSED) return ALREADY_CLOSED;   // 错误：跳过了认证与权限检查
+```
+
+要求的形状：
+
+```text
+1. 认证检查        → 未认证：AUTH_REQUIRED
+2. 身份/权限检查   → 非 Host 调用 CloseMeeting：PERMISSION_DENIED
+3. 资源与状态查询  → 会议不存在或不在本节点：MEETING_NOT_FOUND / MEETING_NOT_LOCAL
+4. 幂等结果求值    → Host 且会议已 CLOSED：ALREADY_CLOSED
+5. 变更或最终拒绝
+```
+
+具体函数切分、错误码数值与对外字段由 Step 1.4 细化；本 Step 冻结的是**顺序与优先级**。
 
 ## 5. Session State
 
@@ -86,12 +149,14 @@ Session 的正式连接生命周期为四个值：
 ```mermaid
 stateDiagram-v2
     [*] --> CONNECTED: TCP accepted
-    CONNECTED --> AUTHENTICATED: authentication success
-    CONNECTED --> CLOSING: disconnect / protocol error (unauthenticated)
-    AUTHENTICATED --> CLOSING: disconnect / protocol error / server shutdown
-    CLOSING --> CLOSED: domain + registry cleanup complete
+    CONNECTED --> AUTHENTICATED: authentication success (domain)
+    CONNECTED --> CLOSING: SessionDisconnected processed (domain)
+    AUTHENTICATED --> CLOSING: SessionDisconnected processed (domain)
+    CLOSING --> CLOSED: 全部受影响 Meeting 清理完成 (domain)
     CLOSED --> [*]
 ```
+
+图中除 `[*] --> CONNECTED` 之外的转换均由领域串行化入口产生；网络线程不直接产生 `CLOSING`（见 3.3 与 5.5 节）。
 
 明确禁止的逆向或跳跃转换：
 
@@ -106,16 +171,31 @@ stateDiagram-v2
 | Current State | Trigger / Command | Preconditions | Next State | Side Effect | Event | Invalid / Idempotent Result |
 | --- | --- | --- | --- | --- | --- | --- |
 | `CONNECTED` | Auth success（现有登录流程） | Token 校验通过 | `AUTHENTICATED` | 绑定 `user_id`；建立 Session 领域记录 | 无会议事件 | 重复认证视为无效，不改状态 |
-| `CONNECTED` | Disconnect / 协议错误 | 无 | `CLOSING` | 停止读取；捕获断线上下文 | 无 | 已 `CLOSING` 时重复触发为幂等 |
+| `CONNECTED` | 未认证连接终止（transport 已断，领域处理 `SessionDisconnected`） | 无 | `CLOSING` | 停止读取；捕获断线上下文 | 无 | 已 `CLOSING`/`CLOSED` 时重复触发为幂等 |
 | `AUTHENTICATED` | Join / Create 等会议命令 | 见第 15、16 节 | `AUTHENTICATED`（不变） | 仅新增／恢复 Binding | 视用例产生 | 会议关系不改变 `connection_state` |
-| `AUTHENTICATED` | Disconnect / 协议错误 / 服务器关闭 | 无 | `CLOSING` | 捕获 `session_id`、`user_id`、`chat_server_id`、原因 | 无 | 重复触发幂等 |
+| `AUTHENTICATED` | 断开终止（transport 已断，领域处理 `SessionDisconnected`） | 无 | `CLOSING` | 捕获 `session_id`、`user_id`、`chat_server_id`、原因；随后 fan-out 清理全部受影响 Meeting 的 Binding | 视各 Meeting 裁决产生 | 重复触发幂等 |
 | `CLOSING` | 任意会议业务命令 | 无 | `CLOSING`（不变） | 无 | 无 | 必须拒绝，不得修改 Meeting |
-| `CLOSING` | 领域清理 + 注册表清理完成 | 该 Session 相关 Binding 均已 UNBOUND | `CLOSED` | 释放 Session 领域记录 | 无 | 重复完成为幂等 |
+| `CLOSING` | 全部受影响 Meeting 的 Binding 清理与 Participant 裁决完成 | 该 `session_id` 在**所有** Meeting 中的 Binding 均已 `UNBOUND` | `CLOSED` | 释放 Session 领域记录 | 无 | 重复完成为幂等 |
 | `CLOSED` | 任意命令或断线 | 无 | `CLOSED`（不变） | 无 | 无 | 全部拒绝或幂等 |
+
+该表中的断线相关行体现 3.3 节原则：网络线程先停止 transport ingress，`CLOSING` 与 `CLOSED` 均由领域入口在同一个 `SessionDisconnected` mutation 内完成，不在网络线程写入。
 
 ### 5.4 与"是否在会议中"的关系
 
 `connection_state` **不表达** Session 是否参加某个 Meeting。该信息由 `ParticipantSessionBinding` 与有效会议 Session 谓词派生（见第 11、12 节）。一个 `AUTHENTICATED` Session 可以同时是 0 个、1 个或多个 Meeting 的有效会议 Session。
+
+### 5.5 connection_state 的唯一修改者
+
+正式 `connection_state` **只能由领域串行化入口修改**，网络线程不得写入。各转换的归属如下：
+
+| 转换 | 触发来源 | 修改者 | 说明 |
+| --- | --- | --- | --- |
+| `CONNECTED → AUTHENTICATED` | 认证流程 | 领域串行化入口 | 认证结果在逻辑线程处理（与现有 `LoginHandler` 位于同一线程语义下） |
+| `AUTHENTICATED → CLOSING` | transport 终止、协议错误、服务器关闭 | 领域串行化入口 | 网络 callback 只投递 `SessionDisconnected`，由领域入口在本步置位（见第 13 节） |
+| `CONNECTED → CLOSING` | 未认证连接终止 | 领域串行化入口 | 同上 |
+| `CLOSING → CLOSED` | 该 Session 全部 Meeting 关系清理完成 | 领域串行化入口 | 见第 13.2 节 |
+
+因此对已认证连接而言，`AUTHENTICATED → CLOSING` 发生在 `SessionDisconnected` 这一 serialized mutation 的**内部**：进入该 mutation 时置位 `CLOSING`，退出前完成全部 Binding 清理与 Participant 裁决并收敛到 `CLOSED`。这意味着 `CLOSING` 对普通断线路径而言不是跨领域操作的可观测状态（详见 13.3 与 23.2 节）。
 
 ## 6. Design Refinement / Compatibility Note：为什么正式 Session State 不使用 JOINED
 
@@ -187,22 +267,41 @@ ENDING  → CREATED
 
 | Current State | Trigger / Command | Preconditions | Next State | Side Effect | Event | Invalid / Idempotent Result |
 | --- | --- | --- | --- | --- | --- | --- |
-| `CREATED` | CreateMeeting | Session 已认证 | `CREATED`（终点同上） | 建 Meeting、建 Host Participant、建 Host Binding、成员数 = 1 | `MeetingCreated` | 无 |
-| `CREATED` | 非 Host 首次 Join（Case A） | 见第 15 节 | `ACTIVE` | 与该 Participant 激活在同一串行化修改内完成 | `ParticipantJoined` | 无 |
-| `CREATED` | Host 重复 Join / 重新绑定 Session | 见第 15 节 Case B/C | `CREATED`（不变） | 仅 Binding 增量 | 无 | **不得**触发 `CREATED → ACTIVE` |
-| `CREATED` | Host BeginClose | 调用者为 Host | `ENDING` | 冻结关闭上下文 | 无 | 非 Host 返回 `PERMISSION_DENIED` |
-| `ACTIVE` | 非 Host Join（Case A） | 见第 15 节 | `ACTIVE`（不变） | 成员数 +1 | `ParticipantJoined` | 无 |
-| `ACTIVE` | Participant Leave | 见第 16 节 | `ACTIVE`（不变） | 成员数 −1，全部 Binding UNBOUND | `ParticipantLeft` | 重复 Leave 返回 `ALREADY_LEFT` |
-| `ACTIVE` | 最后有效 Session 断开 | 见第 13 节 | `ACTIVE`（不变） | 同上 | `ParticipantLeft` | 重复断线不重复事件 |
-| `ACTIVE` | Host BeginClose | 调用者为 Host | `ENDING` | 冻结关闭上下文 | 无 | 非 Host 返回 `PERMISSION_DENIED` |
+| `CREATED` | CreateMeeting | 调用者 Session 已认证 | `CREATED`（终点同上） | 建 Meeting、建 Host Participant、建 Host Binding、成员数 = 1 | `MeetingCreated` | 无 |
+| `CREATED` | 非 Host 首次 Join（Case A） | 调用者已认证；见第 15 节 | `ACTIVE` | 与该 Participant 激活在同一串行化修改内完成 | `ParticipantJoined` | 无 |
+| `CREATED` | Host 重复 Join / 重新绑定 Session | 调用者已认证；见第 15 节 Case B/C | `CREATED`（不变） | 仅 Binding 增量 | 无 | **不得**触发 `CREATED → ACTIVE` |
+| `CREATED` | Host BeginClose | 调用者已认证且为 Host | `ENDING` | 冻结关闭上下文 | 无 | 未认证返回 `AUTH_REQUIRED`；非 Host 返回 `PERMISSION_DENIED` |
+| `ACTIVE` | 非 Host Join（Case A） | 调用者已认证；见第 15 节 | `ACTIVE`（不变） | 成员数 +1 | `ParticipantJoined` | 无 |
+| `ACTIVE` | LeaveMeeting（外部命令） | 调用者已认证且为该会议 Participant；见第 16 节 | `ACTIVE`（不变） | 成员数 −1；该 Participant 全部 Binding `UNBOUND` | `ParticipantLeft` | 重复 Leave 返回 `ALREADY_LEFT`；Host 调用返回 `HOST_MUST_CLOSE_MEETING` |
+| `ACTIVE` | Session Disconnect（内部清理） | 见第 13 节 | `ACTIVE`（不变） | 解除该 Session Binding；如为该 Participant 最后一个有效 Session 则成员数 −1 | 仅在真实 `ACTIVE → LEFT` 时产生一次 `ParticipantLeft` | 重复断线不重复事件；Host 不迁移、不产生事件 |
+| `ACTIVE` | Host BeginClose | 调用者已认证且为 Host | `ENDING` | 冻结关闭上下文 | 无 | 未认证返回 `AUTH_REQUIRED`；非 Host 返回 `PERMISSION_DENIED` |
 | `ACTIVE` | 所有非 Host Participant 离开 | 无 | `ACTIVE`（不变） | 成员数减少 | 视用例 | **不得**回退到 `CREATED` |
-| `CREATED` / `ACTIVE` | Join | 会议为 `ENDING`/`CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED` |
-| `CREATED` / `ACTIVE` | Leave | 会议为 `ENDING`/`CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED` 或幂等清理 |
-| `ENDING` | Join / Leave / 成员关系变更 | 无 | `ENDING`（不变） | 无 | 无 | 一律拒绝，由关闭流程统一清理 |
-| `ENDING` | BeginClose（重复） | 无 | `ENDING`（不变） | 无 | 无 | `CLOSE_IN_PROGRESS`，不得启动第二个关闭流程 |
+| `CREATED` / `ACTIVE` | Join | 调用者已认证；会议为 `ENDING`/`CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED` |
+| `CREATED` / `ACTIVE` | LeaveMeeting（外部命令） | 调用者已认证；会议为 `ENDING`/`CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED`；不接受外部成员关系变更 |
+| `ENDING` | Join | 调用者已认证 | `ENDING`（不变） | 无 | 无 | `MEETING_STATE_REJECTED` |
+| `ENDING` | LeaveMeeting（外部命令） | 调用者已认证 | `ENDING`（不变） | 无 | 无 | `MEETING_STATE_REJECTED`；成员关系已冻结 |
+| `ENDING` | 内部幂等清理（Disconnect / Close cleanup） | 无（内部路径） | `ENDING`（不变） | 仅 Binding 幂等 `UNBOUND` | 无 | 幂等；不改变 membership，不产生 `ParticipantLeft` |
+| `ENDING` | BeginClose（重复） | 调用者已认证且为 Host | `ENDING`（不变） | 无 | 无 | `CLOSE_IN_PROGRESS`，不得启动第二个关闭流程 |
 | `ENDING` | FinalizeClose | 快照已完整组装 | `CLOSED` | 安装快照、设置 `closed_at`、释放活动聚合 | `MeetingClosed` | 重复调用幂等，不重复事件 |
-| `CLOSED` | CloseMeeting | 无 | `CLOSED`（不变） | 无 | 无 | `ALREADY_CLOSED`（幂等成功） |
-| `CLOSED` | 任意成员关系变更 | 无 | `CLOSED`（不变） | 仅允许幂等清理 | 无 | 拒绝，不得重新激活 |
+| `CLOSED` | CloseMeeting | 调用者已认证且为 Host（顺序见 4.1 节） | `CLOSED`（不变） | 无 | 无 | `ALREADY_CLOSED`（幂等成功） |
+| `CLOSED` | CloseMeeting | 调用者已认证但**不是 Host** | `CLOSED`（不变） | 无 | 无 | **`PERMISSION_DENIED`**；不得因会议已关闭而返回 `ALREADY_CLOSED` |
+| `CLOSED` | 外部成员关系命令（Join / LeaveMeeting） | 调用者已认证 | `CLOSED`（不变） | 无 | 无 | 按 4.1 节顺序先判权限后判状态；拒绝且不得重新激活 |
+| `CLOSED` | 内部幂等清理 | 无（内部路径） | `CLOSED`（不变） | 仅 Binding 幂等 `UNBOUND` | 无 | 幂等；不改变 membership |
+
+### 7.4 `CLOSED` 状态下 CloseMeeting 的结果取决于权限
+
+`CLOSED` + `CloseMeeting` 的结果**不是**对任何调用者都返回 `ALREADY_CLOSED`。按 4.1 节的求值顺序：
+
+| 调用者 | 会议状态 | 结果 |
+| --- | --- | --- |
+| Host | `CLOSED` | `ALREADY_CLOSED`（幂等成功，不重复清理、通知与事件） |
+| Host | `ENDING` | `CLOSE_IN_PROGRESS`（幂等，不启动第二个关闭流程） |
+| 非 Host（已认证） | `CLOSED` | `PERMISSION_DENIED`，**不得**返回 `ALREADY_CLOSED` |
+| 非 Host（已认证） | `ENDING` | `PERMISSION_DENIED`，**不得**返回 `CLOSE_IN_PROGRESS` |
+| 非 Host（已认证） | `CREATED` / `ACTIVE` | `PERMISSION_DENIED` |
+| 未认证 Session | 任意 | `AUTH_REQUIRED` |
+
+该规则继承 Step 1.1 的表述"非 Host 即使会议已经关闭，也必须按权限规则拒绝 CloseMeeting"。
 
 ## 8. CREATED → ACTIVE 精确触发规则
 
@@ -334,7 +433,7 @@ Host：
 | `ACTIVE`（HOST） | Join 任意自己的 Session | 同上 | `ACTIVE`（不变） | Binding 增量 | 无 | 不触发 `CREATED → ACTIVE` |
 | `ACTIVE`（PARTICIPANT） | LeaveMeeting | Meeting 为 `CREATED`/`ACTIVE` | `LEFT` | 全部 Binding UNBOUND；成员数 −1；写 `left_at` | `ParticipantLeft` | 无 |
 | `ACTIVE`（HOST） | LeaveMeeting | Meeting 为 `CREATED`/`ACTIVE` | `ACTIVE`（不变） | 不解绑 Host Binding，不改成员数 | 无 | `HOST_MUST_CLOSE_MEETING` |
-| `ACTIVE`（PARTICIPANT） | 最后一个有效 Session 断开 | 有效 Binding 数由 ≥1 变为 0 | `LEFT` | 全部 Binding UNBOUND；成员数 −1 | `ParticipantLeft` | 重复断线不重复事件 |
+| `ACTIVE`（PARTICIPANT） | 最后一个有效 Session 断开 | 本 Meeting 中有效 Binding 数由 ≥1 变为 0 | `LEFT` | 全部 Binding UNBOUND；成员数 −1 | 本 Meeting 一次 `ParticipantLeft` | 重复断线不重复事件；同一 Session 跨多 Meeting 时各 Meeting 独立计数 |
 | `ACTIVE`（HOST） | 最后一个有效 Session 断开 | 有效 Binding 数变为 0 | `ACTIVE`（不变） | 仅解绑该 Session | 无 | 不得产生 `ParticipantLeft` |
 | `LEFT` | LeaveMeeting | 无 | `LEFT`（不变） | 无 | 无 | `ALREADY_LEFT`（幂等） |
 | `LEFT` | Join | Meeting 为 `CREATED`/`ACTIVE` | `ACTIVE` | Binding BOUND；成员数 +1 | `ParticipantJoined` | 视为新的 membership activation |
@@ -418,8 +517,8 @@ stateDiagram-v2
 | 触发来源 | 说明 |
 | --- | --- |
 | Participant 主动 Leave | 该 `(meeting_id, user_id)` 下**全部**活动 Binding 均变为 `UNBOUND` |
-| 对应 Session Disconnect | 只解除该 `session_id` 的 Binding |
-| Meeting Close 清理 | `FinalizeClose` 阶段对所有剩余活动 Binding 执行幂等 UNBOUND |
+| 对应 Session Disconnect | 只解除该 `session_id` 在**各受影响 Meeting** 中的 Binding（一个 Session 可同时影响多个 Meeting，见 13.1 节） |
+| Meeting Close 清理 | `FinalizeClose` 阶段对该 Meeting 所有剩余活动 Binding 执行幂等 UNBOUND |
 | 显式会议解绑 | 预留的统一解绑路径，语义与上述一致且幂等 |
 
 重复 `UNBOUND` 必须幂等：不得出错、不得改变其他 Binding、不得影响成员数。
@@ -428,9 +527,11 @@ stateDiagram-v2
 
 `binding_status == BOUND` 只是必要条件，不是充分条件。Binding 是否"有效"必须结合 Step 1.2 的有效会议 Session 谓词（见第 12 节）。特别地：
 
-> 如果 Session 已经进入 `CLOSING`，即使该 Binding 的清理事件仍在 Logic 队列中、`binding_status` 仍为 `BOUND`，该 Binding 也**不得**被计算为有效会议 Session。
+> 如果 Domain Session 的 `connection_state` 已进入 `CLOSING`，即使该 Binding 的 `binding_status` 仍为 `BOUND`，该 Binding 也**不得**被计算为有效会议 Session。
 
 也就是说，Binding 有效性是**求值时刻的派生谓词**，而不是可缓存的状态位。
+
+需要与第 13 节配合理解：对于断线路径，`AUTHENTICATED → CLOSING`、Binding `BOUND → UNBOUND` 与 Participant 裁决位于**同一个** serialized mutation 内（见 13.2、13.3 节），因此该排除规则不会在两次领域操作之间产生可观测冲突。
 
 ### 11.5 Binding 状态转换表
 
@@ -468,12 +569,18 @@ stateDiagram-v2
 
 ### 12.3 为什么必须排除 `CLOSING`
 
-Session 进入 `CLOSING` 表示该连接已经确定终止，不会再产生新的业务命令。此时：
+Domain Session 进入 `CLOSING` 表示该连接的终止流程已由领域开始处理，不会再接受新的业务命令。此时：
 
 - 该 Binding 在逻辑上已经失效，不应参与成员数或成员状态判断；
-- 但 `binding_status` 可能仍是 `BOUND`，因为清理命令仍在串行队列中排队。
+- 但 `binding_status` 可能仍是 `BOUND`，因为 Binding 清理与状态变更位于同一 serialized mutation 内。
 
-若允许 `CLOSING` 的 Session 计入有效 Session，会出现"参与者已被判定离会后，同一 Session 的命令又把状态改回去"的不一致。因此有效谓词必须包含"未进入 `CLOSING`/`CLOSED`"，使清理前求值与清理后求值得到一致结论。
+若允许 `CLOSING` 的 Session 计入有效 Session，会出现"参与者已被判定离会后，同一 Session 的命令又把状态改回去"的不一致。因此有效谓词必须包含"未进入 `CLOSING`/`CLOSED`"。
+
+与早期表达的差别：本 Step 明确正式 `AUTHENTICATED → CLOSING` 由领域入口在处理 `SessionDisconnected` 时执行，并与 Binding 清理、Participant 裁决位于**同一个** serialized mutation 内。因此：
+
+- 该排除规则只在该 mutation 内部生效；
+- 不会出现"网络线程已把 Session 置为 `CLOSING`、而领域尚未清理 Binding"的跨线程可观测窗口；
+- 普通 Participant 的 `ACTIVE` 且 `effective_binding_count == 0` 不会作为正常可观测状态长期存在（见 23.2 节）。
 
 ### 12.4 Host 的特殊情形
 
@@ -483,47 +590,150 @@ Host 的 `host_user_id` 是聚合根的固有属性，与有效 Session 数无�
 effective_binding_count == 0 且 membership_state == ACTIVE
 ```
 
-这是稳定状态，不是过渡瞬间。
+这是稳定状态，不是过渡瞬间。Host 的该状态可长期存在且可观测，与普通 Participant 不同；二者差别源于 Host 身份不依赖有效连接（见 I4）。
 
 ## 13. Session Disconnect
 
-### 13.1 目标处理顺序
+### 13.1 Transport 终止与 Domain Session 终止的职责划分
+
+Session 终止涉及两个层次的事实，必须分开表达，不得混写：
+
+| 层次 | 事实 | 修改者 | 语义 |
+| --- | --- | --- | --- |
+| Transport | socket 错误／对端关闭／协议失败；连接不再接受新的网络输入 | Asio 网络线程 | 网络事实 |
+| Domain | `Session.connection_state` | 领域串行化入口 | 正式领域状态 |
+| Domain | Binding 与 Participant membership | 领域串行化入口 | 关系事实 |
+
+网络 callback **只允许**完成以下三件事：
+
+```text
+socket error / peer closed / protocol failure
+        ↓
+停止 transport ingress（不再接受该连接的新网络输入）
+        ↓
+捕获稳定 disconnect context
+（session_id / user_id / chat_server_id / reason）
+        ↓
+投递 SessionDisconnected 到领域串行化入口
+```
+
+网络 callback **不允许**：
+
+- 修改 Meeting 聚合、Participant 集合或 Binding；
+- 修改正式的 `Session.connection_state`；
+- 把"transport 已断"直接解释为"领域 Session 已经 `CLOSING`"。
+
+正式的 `AUTHENTICATED → CLOSING` 由领域串行化入口在处理 `SessionDisconnected` 时执行（见 13.2 节），因此 transport 终止与 domain 终止是两个先后发生、由不同执行者完成的事件。
+
+### 13.2 一个 SessionDisconnected 必须 fan-out 到全部受影响 Meeting
+
+由于一个 Session 可以通过多条 Binding 同时参与多个 Meeting，`SessionDisconnected(session_id)` **不能只处理其中一个 Binding 或其中一个 Participant，必须覆盖该 Session 当前关联的全部 Meeting。** 正式处理顺序为：
+
+```text
+SessionDisconnected(session_id) 开始（一次 serialized mutation）
+        ↓
+Domain Session: AUTHENTICATED → CLOSING
+        ↓
+枚举该 session_id 当前关联的全部 BOUND Meeting Binding
+        ↓
+for each affected Meeting（各 Meeting 独立裁决）:
+        解除本 Session 在该 Meeting 中的 Binding（幂等 UNBOUND）
+        ↓
+        定位该 Meeting 中对应的 (meeting_id, user_id) Participant
+        ↓
+        重新计算该 Participant 在本 Meeting 的剩余有效 Binding
+        ↓
+        普通 Participant:
+            剩余 > 0  → 保持 ACTIVE
+            第一次变为 0 → ACTIVE → LEFT
+                          participant_count − 1
+                          ParticipantLeft（该 Meeting 一次）
+        Host（任意 Meeting）:
+            即使变为 0 → 保持 ACTIVE，不产生事件，不关闭 Meeting
+        ↓
+全部受影响 Meeting 的关系清理完成
+        ↓
+Domain Session: CLOSING → CLOSED
+```
+
+对应的联动流程图为：
 
 ```mermaid
 flowchart TD
-    A["网络层检测到 Session 终止<br/>读写错误 / 对端关闭 / 协议错误"] --> B["Session connection_state → CLOSING"]
-    B --> C["该 Session 不再产生新的业务命令"]
-    C --> D["捕获稳定上下文<br/>session_id / user_id / chat_server_id / reason"]
-    D --> E["投递 SessionDisconnected 到<br/>Meeting 领域串行化入口"]
-    E --> F["按 session_id 定位该 Session 的 BOUND Binding"]
-    F --> G["Binding BOUND → UNBOUND（幂等）"]
-    G --> H{"该 Participant 是否仍存在<br/>其他有效会议 Session?"}
-    H -- "存在" --> I["Participant 保持 ACTIVE<br/>不产生 ParticipantLeft"]
-    H -- "不存在" --> J{"role == HOST ?"}
-    J -- "是" --> K["Participant 保持 ACTIVE<br/>Host 身份保留<br/>Meeting 不关闭，不产生 ParticipantLeft"]
-    J -- "否" --> L{"Meeting 状态?"}
-    L -- "CREATED / ACTIVE" --> M["ACTIVE → LEFT<br/>成员数 −1<br/>产生一次 ParticipantLeft"]
-    L -- "ENDING / CLOSED" --> N["不做 membership 变更<br/>仅完成幂等清理<br/>不产生 ParticipantLeft"]
-    I --> O["领域清理完成后 Session → CLOSED"]
-    K --> O
-    M --> O
-    N --> O
+    A["网络线程检测 transport 终止<br/>socket 错误 / 对端关闭 / 协议错误"] --> B["停止 transport ingress<br/>该 CSession 不再产生新输入"]
+    B --> C["捕获稳定 disconnect context<br/>session_id / user_id / chat_server_id / reason"]
+    C --> D["投递 SessionDisconnected 到领域串行化入口"]
+    D --> E["领域入口: Domain Session AUTHENTICATED → CLOSING"]
+    E --> F["枚举该 session_id 关联的全部 BOUND Meeting Binding"]
+    F --> G["for each affected Meeting（各 Meeting 独立裁决）"]
+    G --> H["解除本 Session 在该 Meeting 的 Binding<br/>BOUND → UNBOUND（幂等）"]
+    H --> I{"该 Participant 在本 Meeting<br/>剩余有效 Binding 是否 > 0 ?"}
+    I -- "是" --> J["保持 ACTIVE<br/>不产生 ParticipantLeft"]
+    I -- "否" --> K{"该 Meeting 中 role == HOST ?"}
+    K -- "是" --> L["保持 ACTIVE<br/>Host 身份保留<br/>不关闭 Meeting，不产生 ParticipantLeft"]
+    K -- "否" --> M{"该 Meeting 状态?"}
+    M -- "CREATED / ACTIVE" --> N["ACTIVE → LEFT<br/>participant_count − 1<br/>产生一次 ParticipantLeft"]
+    M -- "ENDING / CLOSED" --> O["不做 membership 变更<br/>仅完成幂等清理<br/>不产生 ParticipantLeft"]
+    J --> P{"是否还有未处理的受影响 Meeting ?"}
+    L --> P
+    N --> P
+    O --> P
+    P -- "有" --> G
+    P -- "无" --> Q["全部 Meeting 关系清理完成<br/>Domain Session CLOSING → CLOSED"]
 ```
 
-### 13.2 关键约束
+一个 Session 断开可能影响 0 个 Meeting（未加入任何会议）或同时影响多个 Meeting，图中循环部分即表达该 fan-out；`ParticipantLeft` 的产生粒度为 `(meeting_id, user_id)`。
 
-1. 网络 io_context 回调**不得**直接修改 Meeting 聚合或其 Participant/Binding 集合。
-2. 网络回调只负责生成稳定上下文并投递事件；投递后不再持有对 Meeting 的修改权。
-3. 断线清理必须幂等：重复投递 `SessionDisconnected` 最多产生一次逻辑移除与一次 `ParticipantLeft`。
-4. 只有当该 Session 相关 Binding 全部 `UNBOUND` 且领域清理完成后，Session 才可进入 `CLOSED`。
+必须遵守的规则：
 
-### 13.3 CSession 存活与有效会议 Session 是两回事
+1. **一个 SessionDisconnect 可以影响 0 个、1 个或多个 Meeting。** 影响 0 个（例如已认证但未加入任何会议）也是合法路径，此时只完成 Session 的领域终止。
+2. **每个 Meeting 独立执行 Participant 裁决。** 某个 Meeting 中的清理结果不得影响另一个 Meeting 的 membership。
+3. **`ParticipantLeft` 的产生粒度是 `(meeting_id, user_id)`。** 每个真实发生 `ACTIVE → LEFT` 的组合最多产生一次；同一 Session 断开跨越 M1、M2 时，若两者都真实发生离会，则各自产生一次，且各自只产生一次。
+4. **Session 只有在全部相关 Meeting Binding 清理完成后才能进入 `CLOSED`。** 不允许"部分 Meeting 已清理但 Session 已 `CLOSED`"。
+5. **重复 `SessionDisconnected` 必须整体幂等。** 重复投递时，已 `CLOSED` 的 Session 与已 `UNBOUND` 的 Binding 均不产生任何二次变更与事件。
+
+为支持"枚举该 `session_id` 的全部 Binding"，实现上需要一个 Session → Binding 的反向索引能力。**其具体 C++ 容器、索引结构与维护方式留给 Step 1.6**，本 Step 只规定该能力必须具备及其语义。
+
+### 13.3 为什么不会出现 Participant ACTIVE 且有效 Session 为 0 的可观测窗口
+
+早期表达为：
+
+```text
+network disconnect → Session connection_state = CLOSING → enqueue SessionDisconnected → Meeting cleanup
+```
+
+这会在"网络线程已置 `CLOSING`、而 Logic worker 尚未处理 `SessionDisconnected`"期间形成：
+
+```text
+Participant == ACTIVE
+effective_binding_count == 0
+```
+
+与普通 Participant 的稳定不变量 I3 冲突。
+
+按 13.1 与 13.2 修正后，该窗口消失，原因有三：
+
+1. **网络线程不写 Domain 状态。** transport 断开时，Domain Session record 保持 `AUTHENTICATED`，Binding 仍为 `BOUND`，因此按第 12 节的谓词求值时 `effective_binding_count` 仍 ≥ 1。
+2. **Domain 置位与 Binding 清理位于同一 mutation。** `AUTHENTICATED → CLOSING`、Binding `BOUND → UNBOUND`、Participant 裁决、`CLOSING → CLOSED` 在同一个 serialized mutation 内完成，中间组合对外不可观测。
+3. **网络输入已被阻止。** 该 Session 无法在此窗口内产生新的会议命令，因此不存在"已被网络判定断开却仍能改变状态"的路径。
+
+因此"`AUTHENTICATED → CLOSING` 发生在串行化处理中"不是实现细节，而是维持 I3 的必要条件。
+
+### 13.4 关键约束
+
+1. 网络 io_context 回调**不得**直接修改 Meeting 聚合、Participant、Binding 或 Domain `connection_state`。
+2. 网络回调只负责停止 ingress、生成稳定上下文并投递事件；投递后不再持有对该 Session 领域状态的修改权。
+3. 断线清理必须幂等：重复投递 `SessionDisconnected` 最多产生一次逻辑移除与一次 `ParticipantLeft`（按 `(meeting_id, user_id)` 计）。
+4. 只有当该 Session 在**全部**相关 Meeting 的 Binding 均已 `UNBOUND` 且领域清理完成后，Session 才可进入 `CLOSED`。
+5. `ENDING`/`CLOSED` 会议中的 Disconnect 只做必要的幂等 `UNBOUND`，不改变 membership，不产生 `ParticipantLeft`。
+
+### 13.5 CSession 存活与有效会议 Session 是两回事
 
 必须强调：
 
 > `CSession` 网络对象是否仍被 `shared_ptr` 临时持有（例如仍被队列中的 `LogicNode` 持有），与"该 Session 是否仍是有效会议 Session"是两个不同问题。
 
-`LogicNode` 持有 `shared_ptr<CSession>` 会延长网络对象的生命周期，使"对象已销毁"无法作为"已退出会议"的判据。因此逻辑离会判断必须基于 Session 状态与 Binding 事实，而不是基于对象是否存在。
+`LogicNode` 持有 `shared_ptr<CSession>` 会延长网络对象的生命周期，使"对象已销毁"无法作为"已退出会议"的判据。同理，transport liveness 也无法作为 Domain `connection_state` 的判据。因此逻辑离会判断必须基于 Domain Session 状态与 Binding 事实，而不是基于对象是否存在或 socket 是否可用。
 
 ## 14. Host Disconnect
 
@@ -531,12 +741,13 @@ flowchart TD
 
 | 情形 | 结果 |
 | --- | --- |
-| Host 的某个 Session 断开 | 只解除该 Session 的 Binding；Host Participant 与 `host_user_id` 保留 |
-| Host 的全部 Session 断开（`effective_binding_count == 0`） | Host 仍为 `ACTIVE`；Meeting 状态不变；不产生 `ParticipantLeft` |
+| Host 的某个 Session 断开 | 只解除该 Session 在全部受影响 Meeting 中的 Binding；各 Meeting 的 Host Participant 与 `host_user_id` 均保留 |
+| Host 的全部 Session 断开（各 Meeting 中 `effective_binding_count == 0`） | 各 Meeting 的 Host 仍为 `ACTIVE`；所有 Meeting 状态不变；不产生 `ParticipantLeft` |
 | Host 断开时 Meeting 为 `CREATED` | 保持 `CREATED`，不回退也不推进 |
 | Host 断开时 Meeting 为 `ACTIVE` | 保持 `ACTIVE` |
 | Host 断开后重新 Join（Case C 或 Re-Join） | 复用原 Participant，新增／恢复 Binding；不触发 `CREATED → ACTIVE` |
 | Host 断开期间其他 Participant 离开 | 正常按第 13 节处理，与 Host 是否在线无关 |
+| Host 的同一 Session 同时属于多个 Meeting | 按 13.2 节 fan-out 到全部受影响 Meeting；每个 Meeting 中 Host 均保持 `ACTIVE`，且不自动关闭任何 Meeting |
 
 ### 14.2 明确禁止
 
@@ -643,18 +854,34 @@ Participant 主动 Leave 是**逻辑 User 级会议离开**，不是只解绑发
 | 调用者 | 目标会议状态 | 结果 |
 | --- | --- | --- |
 | Host | `CREATED` / `ACTIVE` | `HOST_MUST_CLOSE_MEETING`；不解绑 Host Binding、不改成员数、不改状态 |
-| Host | `ENDING` / `CLOSED` | 拒绝或幂等清理；不得改变成员关系 |
+| Host | `ENDING` / `CLOSED` | `MEETING_STATE_REJECTED`；外部 Leave 不得改变成员关系 |
 | Participant | `CREATED` / `ACTIVE` | 正常执行第 16.2 节 |
-| Participant | `ENDING` / `CLOSED` | 拒绝成员关系变更；由关闭流程统一清理 |
-| 未加入者 | 任意 | `NOT_PARTICIPANT` |
+| Participant | `ENDING` / `CLOSED` | `MEETING_STATE_REJECTED`；成员关系已冻结，不接受外部变更 |
+| 未加入者 | 任意开放状态 | `NOT_PARTICIPANT` |
+| 未认证 Session | 任意 | `AUTH_REQUIRED` |
 
-### 16.4 共享幂等移除语义
+### 16.4 外部 LeaveMeeting 与内部幂等清理的区别
 
-主动 Leave、最后一个有效会议 Session 断开、Close 清理必须共用同一条**幂等移除语义**，以便：
+这两个概念必须分开表达，不得互相代替：
+
+| 对比项 | External LeaveMeeting command | Internal idempotent cleanup |
+| --- | --- | --- |
+| 主体 | 已认证 Session 发起的业务命令 | 领域内部路径（`SessionDisconnected`、Close cleanup、重复清理回调） |
+| 目标 | 逻辑 User 级会议离开 | 幂等解除 Binding / 完成已发生的离会收尾 |
+| `ENDING` 后是否允许 | **不允许**改变 membership | **允许**必要的幂等 `UNBOUND` |
+| 是否产生 `ParticipantLeft` | 仅在真实 `ACTIVE → LEFT` 时产生一次 | 不产生（关闭流程由一次 `MeetingClosed` 表达；重复清理不产生） |
+| 是否改成员数 | 真实离会时减一次 | 不改（仅当真实 `ACTIVE → LEFT` 由该路径首次达成时才减） |
+| 对外结果 | 受权限与状态规则约束的错误或幂等结果 | 不对外返回结果 |
+
+因此文档中不再使用没有主体的"拒绝或幂等清理"来描述一个外部 Leave API 的直接结果：**外部 `LeaveMeeting` 在 `ENDING`/`CLOSED` 上就是拒绝**；幂等清理只属于内部路径。
+
+### 16.5 共享幂等移除语义
+
+主动 Leave、最后一个有效会议 Session 断开（见 13.2 节）、Close 清理必须共用同一条**幂等移除语义**，以便：
 
 - 三者定位到同一个 `(meeting_id, user_id)` 逻辑关系。
 - 无论由谁先到达，成员集合最多被减一次。
-- `ParticipantLeft` 最多被产生一次。
+- `ParticipantLeft` 最多按该组合键被产生一次。
 
 ## 17. Close / ENDING
 
@@ -670,8 +897,9 @@ CREATED / ACTIVE → ENDING
 
 进入 `ENDING` 后立即：
 
-- 拒绝新的 Join。
-- 拒绝 Leave 及其他成员关系修改。
+- 拒绝新的外部 Join。
+- 拒绝外部 `LeaveMeeting` 及其他外部成员关系修改。
+- 内部幂等清理（`SessionDisconnected`、Close cleanup）仍可执行必要的 Binding `UNBOUND`，但不改变 membership，也不产生 `ParticipantLeft`（见 16.4 节）。
 - 冻结／捕获关闭所需上下文：历史 Participant 身份、当前成员关系、可通知的 `session_id` 列表、Host、owner ChatServer、`created_at`、其他 ClosedMeetingSnapshot 必需数据。
 
 冻结上下文时只复制稳定标识（如 `session_id` 字符串），**不得**让 Meeting 长期持有 `shared_ptr<CSession>`，也不得依赖 Session 指针在关闭全过程中一直存在。
@@ -700,10 +928,12 @@ CREATED / ACTIVE → ENDING
 
 ```mermaid
 flowchart TD
-    A["Host 调用 CloseMeeting"] --> B{"调用者是否为 Host?"}
-    B -- "否" --> P["PERMISSION_DENIED<br/>会议状态不变"]
+    A["调用 CloseMeeting"] --> A0{"Session 已认证?"}
+    A0 -- "否" --> A1["AUTH_REQUIRED"]
+    A0 -- "是" --> B{"调用者是否为 Host?"}
+    B -- "否" --> P["PERMISSION_DENIED<br/>会议状态不变<br/>即使会议已 CLOSED 也不返回 ALREADY_CLOSED"]
     B -- "是" --> C{"Meeting 当前状态?"}
-    C -- "CREATED / ACTIVE" --> D["BeginClose: → ENDING<br/>拒绝后续 Join / Leave / 成员关系变更"]
+    C -- "CREATED / ACTIVE" --> D["BeginClose: → ENDING<br/>拒绝后续外部 Join / LeaveMeeting"]
     C -- "ENDING" --> E["CLOSE_IN_PROGRESS<br/>不启动第二个关闭流程"]
     C -- "CLOSED" --> F["ALREADY_CLOSED<br/>不重复清理 / 通知 / 事件"]
     D --> G["冻结关闭上下文<br/>历史 Participant 身份 / 可通知 session_id / Host / owner / created_at"]
@@ -714,6 +944,8 @@ flowchart TD
     K --> L["产生一次 MeetingClosed"]
     L --> M["释放活动 Meeting 聚合"]
 ```
+
+该图体现了 4.1 节的求值顺序：认证判定在前、权限判定次之，**只有通过权限判定后**才依据 Meeting 状态给出 `CLOSE_IN_PROGRESS` / `ALREADY_CLOSED` 这类幂等结果。
 
 ## 18. CLOSED Snapshot 原子性
 
@@ -787,11 +1019,13 @@ Snapshot 保留时间与淘汰策略由后续步骤决定。淘汰后查询返�
 | --- | --- |
 | Participant 主动 Leave 且此前为 `ACTIVE` | 产生一次 |
 | 最后一个有效会议 Session 断开且此前为 `ACTIVE` | 产生一次 |
+| 同一 Session 同时断开且影响多个 Meeting | 每个真实发生 `ACTIVE → LEFT` 的 `(meeting_id, user_id)` 各产生一次，且各只一次 |
 | 重复 Leave / 重复 Disconnect / 重复 Binding cleanup | 不产生 |
 | Host 单纯 Disconnect | 不产生 |
-| Host 全部 Session 断开 | 不产生 |
+| Host 全部 Session 断开（包括跨多个 Meeting） | 不产生 |
 | Meeting `ENDING` 后由关闭流程统一清理 | 不产生 |
 | 非活动成员（`LEFT`）再次被清理 | 不产生 |
+| 内部幂等清理（见 16.4 节）未真实改变 membership | 不产生 |
 
 ### 19.4 MeetingClosed 的产生与不产生
 
@@ -807,6 +1041,7 @@ Snapshot 保留时间与淘汰策略由后续步骤决定。淘汰后查询返�
 
 - 只有实际发生状态转换的那一次调用可以产生事件。
 - 幂等命中路径一律不产生事件。
+- `ParticipantJoined` / `ParticipantLeft` 的产生粒度为 `(meeting_id, user_id)`；一个 Session 断开跨越多个 Meeting 时，各 Meeting 独立计数。
 - 关闭流程不产生逐成员事件，只产生一次 `MeetingClosed`。
 
 本步骤不实现 MQ、ACK、retry 或可靠投递，因此不定义投递保证，也不承诺 exactly-once delivery。
@@ -828,6 +1063,7 @@ Single-Writer / Serialized Mutation
 - Participant collection
 - Binding
 - CLOSED Snapshot
+- Domain Session `connection_state`
 
 必须进入该边界的操作至少包括：
 
@@ -850,17 +1086,23 @@ FinalizeClose
 普通 TCP Meeting 命令:
 CSession → LogicNode → LogicSystem queue → Meeting domain
 
-断线事件:
-network disconnect callback
+断线事件（transport 先终止，领域后处理）:
+network callback
+→ stop transport ingress
 → capture stable session context
 → enqueue SessionDisconnected
-→ serialized Meeting cleanup
+→ serialized domain processing:
+     Session AUTHENTICATED → CLOSING
+     fan-out 到全部受影响 Meeting 的 Binding 清理
+     逐个 Meeting 执行 Participant 裁决
+     Session CLOSING → CLOSED
 ```
 
 明确禁止：
 
 ```text
 network callback → directly mutate Meeting
+network callback → directly write Domain connection_state
 ```
 
 ### 20.3 为什么选择串行化而不是细粒度锁
@@ -904,9 +1146,12 @@ QueryMeeting 与 ListParticipants 是只读操作。在串行化模型下，只�
 | 8 | Disconnect vs Close | 若 Close 已进入 `ENDING`：Disconnect 只允许执行必要的 Binding 幂等清理 | 不再启动另一条普通 `ParticipantLeft` 逻辑 | 不重复产生事件 |
 | 9 | 多 Session Disconnect | Session A 断开时若仍有其他有效 Session：Participant 保持 `ACTIVE` | 后续 Session B 断开，且使有效 Binding 数第一次变为 0 时才允许逻辑离会 | 只在由 ≥1 变为 0 时移除 |
 | 10 | Stale Disconnect vs Reconnect | 旧 Session A 已断线、新 Session B 已 Join | A 的清理稍后执行时只能解除 A 的 Binding | B 仍有效时不得把 Participant 移出 Meeting |
-| 11 | Close vs Close | 第一个 BeginClose 使 `CREATED`/`ACTIVE → ENDING` | 第二个返回 `CLOSE_IN_PROGRESS`；已 `CLOSED` 时返回 `ALREADY_CLOSED` | 只产生一次 `MeetingClosed`，不重复清理与广播 |
+| 11 | Close vs Close | 第一个 BeginClose 使 `CREATED`/`ACTIVE → ENDING` | 第二个在 `ENDING` 返回 `CLOSE_IN_PROGRESS`；第二个在 `CLOSED` 且调用者为 Host 时返回 `ALREADY_CLOSED`；非 Host 无论何状态均返回 `PERMISSION_DENIED` | 只产生一次 `MeetingClosed`，不重复清理与广播 |
 | 12 | Re-Join vs Close | 若 Re-Join 在 `CREATED`/`ACTIVE` 时先执行：Participant 回到 `ACTIVE` | 随后 Close 将其纳入终态快照 | `ENDING` 后不得 `LEFT → ACTIVE` |
 | 13 | Re-Join vs Close | 若 Close 先使 Meeting 进入 `ENDING` | Re-Join 必须被拒绝 | `ENDING` 后禁止成员激活 |
+| 14 | 单个 Session Disconnect 跨越多个 Meeting（M1/M2） | 同一 serialized mutation 内依次清理 M1、M2 的 Binding | 各 Meeting **独立**裁决 Participant，互不影响 | 一个 Meeting 的裁决结果不得改变另一个 Meeting 的 membership；`ParticipantLeft` 按 `(meeting_id, user_id)` 各最多一次 |
+| 15 | Stale Disconnect 与 Re-Join 重叠（同一 Meeting） | 旧 Session 清理仅解除旧 Binding | 若此时新 Session 已建立有效 Binding，则保持 `ACTIVE` | 不得因旧 Session 清理而移出新 Session 支撑的 Participant |
+| 16 | 非 Host CloseMeeting on `CLOSED` vs 幂等结果 | 权限检查先于幂等求值 | 非 Host 得到 `PERMISSION_DENIED`；Host 得到 `ALREADY_CLOSED` | 幂等语义不得绕过认证与权限（见 4.1 节） |
 
 ### 21.2 竞态裁决示意
 
@@ -927,15 +1172,22 @@ flowchart TD
     F -- "否" --> F2{"Participant 为 ACTIVE?"}
     F2 -- "是" --> F3["ACTIVE → LEFT<br/>一次 ParticipantLeft"]
     F2 -- "否" --> F4["ALREADY_LEFT（幂等）"]
-    D -- "SessionDisconnected" --> G["解除该 Session Binding"]
-    G --> G1{"剩余有效 Session 为 0?"}
+    D -- "SessionDisconnected" --> G0["Domain Session AUTHENTICATED → CLOSING"]
+    G0 --> G0b["枚举该 session 的全部 BOUND Meeting Binding<br/>for each affected Meeting"]
+    G0b --> G1{"该 Participant 在本 Meeting<br/>剩余有效 Session 为 0?"}
     G1 -- "否" --> G2["保持 ACTIVE"]
     G1 -- "是" --> G3{"是 Host?"}
     G3 -- "是" --> G4["保持 ACTIVE，不产生事件"]
     G3 -- "否" --> G5{"会议为 CREATED/ACTIVE?"}
     G5 -- "是" --> G6["ACTIVE → LEFT<br/>一次 ParticipantLeft"]
     G5 -- "否" --> G7["仅幂等清理"]
-    D -- "Close" --> H["BeginClose → ENDING → FinalizeClose → CLOSED"]
+    G2 --> G8["全部 Meeting 清理完成<br/>Session CLOSING → CLOSED"]
+    G4 --> G8
+    G6 --> G8
+    G7 --> G8
+    D -- "Close" --> H0{"已认证且为 Host?"}
+    H0 -- "否" --> H1["PERMISSION_DENIED"]
+    H0 -- "是" --> H["BeginClose → ENDING → FinalizeClose → CLOSED"]
 ```
 
 ### 21.3 裁决原则
@@ -943,21 +1195,40 @@ flowchart TD
 1. **顺序即裁决。** 不做抢占，不做优先级反转；先进入边界者先完成。
 2. **先到者胜出并产生事件。** 后续到达者只能走幂等或拒绝路径。
 3. **状态判断在边界内进行。** 任何请求都不得在边界外预判状态后直接修改。
-4. **幂等路径不产生事件。** 只有真实转换产生事件。
-5. **`ENDING` 是硬边界。** 进入 `ENDING` 后一切成员关系变更停止。
+4. **认证与权限先于幂等结果。** 任何请求均按 4.1 节的顺序求值；不得因资源已处于终态而跳过权限判定。
+5. **幂等路径不产生事件。** 只有真实转换产生事件。
+6. **`ENDING` 是硬边界。** 进入 `ENDING` 后一切**外部**成员关系变更停止；**内部**幂等清理不受此限，但不得改变 membership。
+7. **fan-out 之间相互独立。** 一次 `SessionDisconnected` 引起的多个 Meeting 裁决彼此不影响，各自遵循上述原则。
 
 ## 22. Query 一致性
 
 1. QueryMeeting 与 ListParticipants 是只读操作，不改变状态机。
 2. Query 不得看到聚合的中间修改状态。在串行化模型下，查询应得到逻辑一致的观察结果：`CREATED`、`ACTIVE`、`ENDING`，或 `CLOSED` 快照之一。
-3. CLOSED 查询只能来自 `ClosedMeetingSnapshot`。
-4. 禁止通过已经释放的活动 Participant 或 `CSession` 推导 CLOSED 数据。
-5. 快照淘汰后查询返回 `MEETING_NOT_FOUND`。
-6. 本 Step 不定义 Step 1.4 的完整响应字段；响应内容与错误码数值由 Step 1.4 固化。
+3. **"逻辑一致"的判定基准是领域稳定状态**：上一个 serialized domain operation 已完整结束，当前不存在正在执行但尚未完成的 `SessionDisconnected` / `Join` / `Leave` / `Close` 等 mutation。未完成 mutation 内的中间组合（包括 `AUTHENTICATED → CLOSING` 与 Binding `BOUND → UNBOUND` 之间的瞬间）对 Query 不可见。
+4. 因此 Query 不会观测到"普通 Participant 为 `ACTIVE` 而 `effective_binding_count` 为 0"这类中间组合；该组合只允许在 `SessionDisconnected` 这一个 mutation 内部存在。
+5. CLOSED 查询只能来自 `ClosedMeetingSnapshot`。
+6. 禁止通过已经释放的活动 Participant 或 `CSession` 推导 CLOSED 数据。
+7. 快照淘汰后查询返回 `MEETING_NOT_FOUND`。
+8. Query 同样遵循 4.1 节的顺序：先认证与权限，再判定资源与状态；不得因会议已 `CLOSED` 而绕过历史成员鉴权。
+9. 本 Step 不定义 Step 1.4 的完整响应字段；响应内容与错误码数值由 Step 1.4 固化。
 
 ## 23. State Invariants
 
 本节区分**稳定状态不变量**与**过渡阶段暂态**。稳定不变量在任一操作完成后必须成立；过渡暂态只允许在一次串行化修改处理过程中短暂存在，且不得对外可观测。
+
+### 23.0 "领域稳定状态"的定义
+
+本文多次引用"领域稳定状态"，其含义固定为：
+
+> **上一个 serialized domain operation 已完整结束，当前不存在正在执行但尚未完成的 `SessionDisconnected` / `JoinMeeting` / `LeaveMeeting` / `CloseMeeting` / `FinalizeClose` mutation。**
+
+据此：
+
+- 稳定状态不变量（I1–I12）在**领域稳定状态**下必须全部成立。
+- 任何中间组合（例如 `AUTHENTICATED → CLOSING` 已置位但 Binding 尚未 `UNBOUND`）只允许存在于**单个** mutation 内部，且对 Query 与对外响应不可见。
+- `MeetingRegistry` 等结构对外发布的状态必须是"某次 mutation 完整结束后的状态"，不得是 mutation 中途的状态。
+
+对普通 Participant 特别强调：**`participant_state == ACTIVE` 且 `effective_binding_count == 0` 不允许作为领域稳定状态长期存在**。它只允许出现在 `SessionDisconnected` 这一 mutation 的内部（Binding 刚解除、`ACTIVE → LEFT` 尚未落定的瞬间）。与之相对，**Host 的同一组合是其正常稳定状态**（见 I4）。
 
 ### 23.1 稳定状态不变量
 
@@ -965,9 +1236,9 @@ flowchart TD
 | --- | --- | --- |
 | I1 | `Meeting == CLOSED` ⇒ 不存在有效会议 Binding | 关闭清理完成后，该 Meeting 下不得有任何有效 Binding |
 | I2 | `Participant == LEFT` ⇒ 不属于活动成员集合 | 活动成员集合只包含 `ACTIVE` 的 Participant |
-| I3 | `Participant == ACTIVE && role == PARTICIPANT` ⇒ 正常稳定状态下至少存在一个有效会议 Session | 否则应已转为 `LEFT` |
-| I4 | `Participant == ACTIVE && role == HOST` ⇒ 可以存在 0 个有效会议 Session | Host 身份与有效连接数无关 |
-| I5 | Binding 被视为有效 ⇒ Session 必须为 `AUTHENTICATED` 且不是 `CLOSING`/`CLOSED` | 有效谓词的组成部分 |
+| I3 | `Participant == ACTIVE && role == PARTICIPANT` ⇒ 在领域稳定状态下至少存在一个有效会议 Session | 由 `SessionDisconnected` 在同一 mutation 内保证；不依赖网络线程与领域线程的执行时序 |
+| I4 | `Participant == ACTIVE && role == HOST` ⇒ 可以存在 0 个有效会议 Session | Host 身份与有效连接数无关；该组合是 Host 的稳定状态 |
+| I5 | Binding 被视为有效 ⇒ Domain Session 必须为 `AUTHENTICATED` 且不是 `CLOSING`/`CLOSED` | 有效谓词的组成部分 |
 | I6 | `Meeting == ENDING/CLOSED` ⇒ 不允许创建新的逻辑 Participant | 关闭后不得新增成员 |
 | I7 | 同一 Meeting ⇒ 同一 `user_id` 最多一个逻辑 Participant | `(meeting_id, user_id)` 唯一 |
 | I8 | 同一 Participant ⇒ 同一 `session_id` 最多一个有效 Binding | 禁止重复有效绑定 |
@@ -980,17 +1251,96 @@ flowchart TD
 
 | 暂态 | 允许存在的范围 | 约束 |
 | --- | --- | --- |
-| Session 已 `CLOSING` 但其 Binding 仍为 `BOUND` | 从网络回调置位 `CLOSING` 到串行化边界处理 `SessionDisconnected` 之间 | 该 Binding 已按 I5 判定为无效；不得据此认为 Participant 仍在会议中；不得对外暴露为"有效会议 Session" |
+| Domain Session 已置 `CLOSING` 但其 Binding 仍为 `BOUND` | **仅**在 `SessionDisconnected` 这一个 mutation 内部（置位 `CLOSING` 之后、Binding 全部 `UNBOUND` 之前） | 不得跨领域操作存在；不得对 Query 或对外响应可见；不得由网络线程产生该组合 |
+| 普通 Participant 为 `ACTIVE` 而其有效 Binding 数为 0 | **仅**在同一 `SessionDisconnected` mutation 内部（Binding 解除后、`ACTIVE → LEFT` 落定前） | 不是领域稳定状态；mutation 结束前必须收敛为 `LEFT`；Host 不受此约束（I4） |
 | Meeting 为 `ENDING` 而快照尚未发布 | BeginClose 到原子发布之间 | 对外只能观察为 `ENDING`；不得暴露部分快照 |
 | Participant 已置 `LEFT` 而其 Binding 尚未全部 `UNBOUND` | 同一次串行化修改内部 | 必须在该次修改内完成全部解绑；对外不可见 |
-| Meeting 为 `ACTIVE` 而某 Participant 的 Binding 数为 0 且该 Participant 仍 `ACTIVE` | Re-Join 之间、或网络抖动期间 | 对普通 Participant 应为短暂状态，且必须由后续 `SessionDisconnected` 或 Re-Join 收敛；Host 属稳定状态（I4） |
+| 同一 `SessionDisconnected` 的 fan-out 尚未覆盖全部受影响 Meeting | 同一次串行化修改内部 | 各 Meeting 的裁决按序进行；在该 mutation 结束前必须全部完成，且 Session 不得提前进入 `CLOSED` |
 | 活动聚合已释放而查询仍可命中 | 不允许存在 | 发布快照与释放聚合之间不得出现可观测空窗（见第 18 节） |
 
 ### 23.3 不变量的使用方式
 
-- 每次串行化修改结束后，应可检查 I1–I12。
+- 每次串行化修改结束后（即回到领域稳定状态时），应可检查 I1–I12。
+- 检查时机是在 mutation 边界之外，不得在 mutation 中途断言。
 - 后续单元测试应把 I1–I12 直接翻译为断言。
-- 若实现过程中发现某条不变量在稳定状态下不成立，应通过版本化设计变更记录说明，而不是放宽该不变量。
+- 若实现过程中发现某条不变量在领域稳定状态下不成立，应通过版本化设计变更记录说明，而不是放宽该不变量。
+
+### 23.4 验证场景
+
+以下场景用于验收本 Step 的规则是否自洽，可直接转为后续单元测试。
+
+#### Case 1：单 Session 普通 Participant 断开
+
+前提：普通 Participant 只拥有 Session A。
+
+```text
+transport A 断开；SessionDisconnected(A) 尚未被领域线程处理期间：
+  - 网络层不能再接受 A 的新输入
+  - Domain Session 仍为 AUTHENTICATED；Binding 仍为 BOUND
+  - effective_binding_count 仍为 1（I3 成立）
+  - 不存在由网络线程直接修改 Meeting 而产生的半状态
+
+处理 SessionDisconnected(A) 后：
+  - Session A → CLOSED
+  - Participant → LEFT
+  - ParticipantLeft 恰产生一次
+```
+
+#### Case 2：多 Session 同一 Participant
+
+前提：Participant 拥有 Session A 与 Session B，两者均绑定同一 Meeting。
+
+```text
+A 断开：Participant 保持 ACTIVE（B 仍为有效会议 Session）
+B 断开：Participant ACTIVE → LEFT
+结果：全程只产生一次 ParticipantLeft
+```
+
+#### Case 3：同一 Session 同时参与多个 Meeting
+
+前提：Session A 同时绑定 Meeting M1 与 M2。
+
+```text
+A 断开必须同时清理：
+  M1 中 session A 的 Binding
+  M2 中 session A 的 Binding
+
+并分别裁决 M1、M2 的 Participant：
+  M1 的裁决结果不得影响 M2 的 membership
+  若 M1 与 M2 均真实发生 ACTIVE → LEFT，则各产生一次 ParticipantLeft
+
+只有两边清理均完成后：
+  Session A → CLOSED
+```
+
+#### Case 4：Host Session 跨多个 Meeting
+
+前提：Host 的 Session A 同时属于多个 Meeting。
+
+```text
+A 断开：
+  - 所有对应 Binding 均被清理
+  - 所有 Meeting 中的 Host Participant 均继续 ACTIVE
+  - 不产生任何 ParticipantLeft
+  - 不得自动关闭任何 Meeting，不得转移 Host
+```
+
+#### Case 5：非 Host 对已 CLOSED 会议调用 CloseMeeting
+
+```text
+请求：非 Host、已认证、Meeting 为 CLOSED
+期望：PERMISSION_DENIED
+不允许：ALREADY_CLOSED
+```
+
+对应的 Host 情形：
+
+```text
+Host、Meeting 为 CLOSED  → ALREADY_CLOSED
+Host、Meeting 为 ENDING → CLOSE_IN_PROGRESS
+非 Host、Meeting 为 ENDING → PERMISSION_DENIED
+未认证、任意状态       → AUTH_REQUIRED
+```
 
 ## 24. 非法状态转换
 
@@ -1003,6 +1353,8 @@ flowchart TD
 | `CLOSING` | 回到 `CONNECTED`/`AUTHENTICATED` | 非法；无此转换 |
 | `CLOSED` | 任意触发 | 非法；`CLOSED` 为终态 |
 | `CONNECTED` | 直接进入 `CLOSED` | 非法；必须经过 `CLOSING` |
+| 任意 | 由网络线程写入 `connection_state` | 非法；transport 事实不得直接写成 Domain 状态（见 3.3、5.5 节） |
+| 任意 | 跳过权限检查直接用幂等结果作为响应 | 非法；见 4.1 节求值顺序 |
 
 ### 24.2 Meeting
 
@@ -1036,6 +1388,8 @@ flowchart TD
 
 非法转换不产生任何状态变化，也不产生任何领域事件。对外可观测的结果使用 Step 1.1 已定义的语义名称（`AUTH_REQUIRED`、`MEETING_NOT_FOUND`、`MEETING_NOT_LOCAL`、`MEETING_STATE_REJECTED`、`NOT_PARTICIPANT`、`PERMISSION_DENIED`、`HOST_MUST_CLOSE_MEETING`、`ALREADY_JOINED`、`ALREADY_LEFT`、`CLOSE_IN_PROGRESS`、`ALREADY_CLOSED`）。数值错误码由 Step 1.4 固化。
 
+选择哪一个语义名称必须遵循 4.1 节的顺序：认证 → 权限 → 资源与状态 → 幂等结果。例如"非 Host + `CLOSED` 会议 + CloseMeeting"的对外结果必须是 `PERMISSION_DENIED`，而不是 `ALREADY_CLOSED`。
+
 ## 25. 当前代码与目标设计差异
 
 本节只陈述事实，不表示目标设计已实现。
@@ -1043,14 +1397,17 @@ flowchart TD
 | 方面 | 当前代码事实 | Step 1.3 目标设计 |
 | --- | --- | --- |
 | Session 状态 | `CSession` 只有 `bool _b_close`，无连接状态枚举 | 引入 `CONNECTED`/`AUTHENTICATED`/`CLOSING`/`CLOSED` |
+| Transport 与 Domain 区分 | 不存在区分；`_b_close` 与 `ClearSession` 混用网络与业务语义 | 网络线程只管 transport，`connection_state` 只由领域入口修改 |
 | Session 与会议关系 | 不存在会议相关状态 | 由 Binding 派生，不放入 `connection_state` |
 | 会议对象 | 不存在 | Meeting 聚合 + Participant + Binding + Snapshot |
-| 断线入口 | `CSession` 读写回调直接调用 `CServer::ClearSession` | 网络回调只捕获上下文并投递 `SessionDisconnected` |
-| 断线清理范围 | `ClearSession` 无条件按 `uid` 调用 `UserMgr::RmvUserSession`，不校验待删除 Session 是否仍是该 uid 的当前映射 | 只解除该 `session_id` 的 Binding，不按 uid 泛化删除 |
+| 断线入口 | `CSession` 读写回调直接调用 `CServer::ClearSession` | 网络回调只停止 ingress 并投递 `SessionDisconnected` |
+| 断线清理范围 | `ClearSession` 无条件按 `uid` 调用 `UserMgr::RmvUserSession`，不校验待删除 Session 是否仍是该 uid 的当前映射 | 只解除该 `session_id` 在各受影响 Meeting 中的 Binding，不按 uid 泛化删除 |
+| Session→Binding 反向索引 | 不存在；单个 `user_id` 只对应一个 Session，不涉及多会议关系 | 需要能枚举某 `session_id` 的全部 Binding（实现方式留给 Step 1.6） |
 | 用户映射 | `UserMgr` 为 `user_id → 单个 Session` | 会议关系由多 Binding 表达，不依赖该映射支持多 Session |
-| 线程模型 | 多个 Asio io_context 线程 + 1 个逻辑 worker 线程；`ClearSession` 在网络线程执行 | 所有 Meeting 修改只在串行化边界内发生 |
+| 线程模型 | 多个 Asio io_context 线程 + 1 个逻辑 worker 线程；`ClearSession` 在网络线程执行 | Meeting 与 Domain Session 变更只在串行化边界内发生 |
 | 对象生命周期 | `LogicNode` 持有 `shared_ptr<CSession>`，会延长网络对象生命周期 | 领域层只保存稳定 ID；不把对象存活当作会议关系判据 |
 | 发送语义 | `CSession::Send` 在发送队列超过 `MAX_SENDQUE` 时直接丢弃并返回 | 通知视为 best-effort 副作用，失败不回滚领域状态 |
+| 权限与幂等顺序 | 不存在统一的会议命令求值管道 | 按 4.1 节固定顺序求值，幂等不得绕过认证与权限 |
 | 会议事件 | 不存在 | 定义四类本地领域事件及产生规则（不接入 MQ） |
 | 会议持久化 | 不存在 | 保持 owner ChatServer 内存态，不写 MySQL / Redis |
 
@@ -1075,11 +1432,14 @@ flowchart TD
 - `MeetingRegistry` 的 C++ 类型；
 - Participant 使用何种 STL 容器；
 - 历史 Participant 身份保留方式（history vector / tombstone map / archive）；
+- **Session → Binding 反向索引的容器与维护方式**（用于 13.2 节 fan-out 枚举某 `session_id` 的全部 Binding）；
 - `SessionRegistry` 的实现；
 - mutex 或 strand 的具体 C++ 类型；
 - 单元测试框架与测试代码；
+- 单 worker 串行入口的具体实现（如何复用 `LogicSystem` 队列）；
 - `LogicSystem` 如何新增断线命令类型；
-- Snapshot 原子发布的 C++ 手段。
+- Snapshot 原子发布的 C++ 手段；
+- transport 终止与 `SessionDisconnected` 投递之间的去重实现（避免重复投递同一 `session_id`）。
 
 ## 27. 明确不实现内容
 
@@ -1115,7 +1475,28 @@ flowchart TD
 8. 明确 CLOSED Snapshot 的生成、发布、清理与 Query 可见性的原子语义，并禁止"先清空 Participant 再生成 Snapshot"。
 9. 明确 `MeetingCreated`、`ParticipantJoined`、`ParticipantLeft`、`MeetingClosed` 的产生与不产生规则。
 10. 提供 Session、Meeting、Participant、Binding 四张文字状态转换表，且每行包含当前状态、触发、前置条件、下一状态、副作用、事件与非法/幂等结果。
-11. 提供 `State Invariants` 章节，区分稳定不变量与过渡暂态。
+11. 提供 `State Invariants` 章节，区分稳定不变量与过渡暂态，并给出"领域稳定状态"的定义。
 12. 所有 Mermaid 图与文字规则一致，全部状态名称前后一致，不存在同一操作在不同章节得到两个不同结论。
 13. 文档为 UTF-8 编码，Markdown 与 Mermaid 围栏完整，表格列数一致。
 14. 本轮未修改任何 `.cpp`、`.h`、`.hpp`、`message.proto`、TCP message ID、Qt Client、工程文件、配置、Redis key、MySQL schema、README、Step 1.1 与 Step 1.2 文档。
+
+### 28.1 Review 修正项验收（本文档修订后追加）
+
+在 28 节基础验收之外，本次设计复审要求以下项同样成立：
+
+| # | 修正项 | 验收依据 |
+| --- | --- | --- |
+| R1 | Transport 终止与 Domain Session State 区分 | 3.3 节定义两层次；5.5 节固定修改者；13.1 节固定网络 callback 的允许与禁止行为 |
+| R2 | 正式 `AUTHENTICATED → CLOSING` 由串行化处理产生 | 5.5、13.2 节；网络线程不写 Domain `connection_state` |
+| R3 | 有效 Binding 与 CLOSING 的关系 | 11.4、12.3 节，并说明其与同一 mutation 语义的配合 |
+| R4 | I3 与跨线程窗口不再冲突 | 13.3 节说明窗口消失的三条原因；23.0 节定义领域稳定状态；23.2 节限定暂态范围 |
+| R5 | `SessionDisconnected` fan-out 到多个 Meeting | 13.2 节规则与流程图；21.1 表第 14 条 |
+| R6 | fan-out 的各 Meeting 裁决相互独立 | 13.2 节规则 2；21.3 节原则 7 |
+| R7 | `ParticipantLeft` 粒度为 `(meeting_id, user_id)` | 13.2 节规则 3；19.3 节；19.5 节 |
+| R8 | Session 仅在全部 Meeting 清理完成后 `CLOSED` | 13.2 节规则 4；13.4 节约束 4 |
+| R9 | 重复 `SessionDisconnected` 整体幂等 | 13.2 节规则 5；13.4 节约束 3 |
+| R10 | 认证与权限优先于幂等结果 | 4.1 节；7.4 节；21.3 节原则 4；22 节第 8 项；24.5 节 |
+| R11 | 非 Host 对 `CLOSED` 会议 Close 返回 `PERMISSION_DENIED` | 7.3 节对应行；7.4 节；17.4 节流程图；23.4 节 Case 5 |
+| R12 | 外部 `LeaveMeeting` 与内部幂等清理区分 | 16.4 节；7.3 节；17.1 节 |
+| R13 | 不再出现无主体的"拒绝或幂等清理"表述 | 全文检索该表述应仅出现在 16.4 节的否定说明中 |
+| R14 | 验证场景 Case 1–5 可从文档直接推导 | 23.4 节 |
