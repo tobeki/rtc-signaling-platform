@@ -420,6 +420,36 @@ active_participant_count = 1
 MeetingCreated 恰好一次
 ```
 
+### 13.3.1 CreateMeeting 不产生 ParticipantJoined
+
+`CreateMeeting` **只产生 `MeetingCreated`，不产生 `ParticipantJoined`**。
+
+`ParticipantJoined` 的语义是：
+
+```text
+非 Host 用户：不存在 / LEFT → ACTIVE
+```
+
+Host 的初始 Participant 由 `CreateMeeting` 建立，不属于"加入一个已存在的会议"，因此不产生 `ParticipantJoined`。
+
+下列情况均**不得**产生该事件：
+
+```text
+CreateMeeting 创建 Host
+Host 初始 Participant 建立
+Host 初始 Binding 建立
+Host additional Session binding
+同 Session duplicate Join
+普通 Participant additional Session binding
+```
+
+因此本节与第 23 节的共同结论是：
+
+```text
+CreateMeeting → MeetingCreated exactly once
+CreateMeeting → 不产生 ParticipantJoined
+```
+
 ### 13.4 Response
 
 | 字段 | 内容 |
@@ -443,10 +473,12 @@ MeetingCreated 恰好一次
 
 | 条件 | 结果 |
 | --- | --- |
+| Context 结构非法 | `INVALID_ARGUMENT` |
 | 未认证 | `AUTH_REQUIRED` |
 | Session 已 `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| context 不合法 | `INVALID_ARGUMENT` |
 | 领域不变量破坏 | `INTERNAL_ERROR` |
+
+本 API 无业务 payload，因此不存在 `meeting_id` 参数校验。
 
 ## 14. API 2：JoinMeeting
 
@@ -457,6 +489,8 @@ MeetingCreated 恰好一次
 | `meeting_id` | 目标 Meeting | 必需 |
 
 用户身份与 `session_id` 来自 Context，payload 不得提供。
+
+`meeting_id` 缺失或语义非法时，必须在 Meeting lookup 之前返回 `INVALID_ARGUMENT`（见 19.1.2 节），不得表现为 `MEETING_NOT_FOUND`。
 
 ### 14.2 JoinOutcome
 
@@ -554,9 +588,10 @@ join_outcome = ALREADY_BOUND
 
 | 条件 | 结果 |
 | --- | --- |
+| Context 结构非法 | `INVALID_ARGUMENT` |
 | 未认证 | `AUTH_REQUIRED` |
 | Session 已 `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| `meeting_id` 缺失或非法 | `INVALID_ARGUMENT` |
+| `meeting_id` 缺失或语义非法（先于 lookup） | `INVALID_ARGUMENT` |
 | 本节点无记录且无可信异地 owner | `MEETING_NOT_FOUND` |
 | 可信 owner 为其他节点 | `MEETING_NOT_LOCAL` |
 | Meeting 为 `ENDING`/`CLOSED` | `MEETING_STATE_REJECTED` |
@@ -569,6 +604,8 @@ join_outcome = ALREADY_BOUND
 | --- | --- | --- |
 | `meeting_id` | 目标 Meeting | 必需 |
 
+`meeting_id` 缺失或语义非法时，必须在 Meeting lookup 之前返回 `INVALID_ARGUMENT`（见 19.1.2 节）。
+
 ### 15.2 LeaveOutcome
 
 | 值 | 含义 |
@@ -579,6 +616,7 @@ join_outcome = ALREADY_BOUND
 
 | 调用者情形 | Meeting 状态 | 结果码 | disposition | 状态变化 | 事件 |
 | --- | --- | --- | --- | --- | --- |
+| 任意（`meeting_id` 缺失或语义非法） | 不适用 | `INVALID_ARGUMENT` | `ERROR` | 无（先于 lookup） | 无 |
 | 普通 `ACTIVE` Participant | `CREATED` / `ACTIVE` | `OK` | `SUCCESS` | `ACTIVE → LEFT`；该 User 全部 Binding `UNBOUND`；成员数 −1 | `ParticipantLeft` 一次 |
 | 已知历史 Participant，当前 `LEFT` | `CREATED` / `ACTIVE` | `ALREADY_LEFT` | `IDEMPOTENT` | 无 | 无 |
 | 从未加入过的用户 | `CREATED` / `ACTIVE` | `NOT_PARTICIPANT` | `ERROR` | 无 | 无 |
@@ -656,18 +694,51 @@ ParticipantLeft 恰好一次
 | Host | `CLOSED` | `ALREADY_CLOSED` | `IDEMPOTENT` | 无 | `CLOSED` |
 | 非 Host | 任意状态 | `PERMISSION_DENIED` | `ERROR` | 无 | 按可见规则返回或不返回 |
 
-### 16.5 首次合法 Close 的正式选择
+### 16.5 首次合法 Close 的正式执行模型
 
-首次合法 Close 执行：
+#### 16.5.1 两个独立的 serialized work item
+
+正式冻结为：`CloseMeeting` 与 `FinalizeClose` 是**两个不同的 serialized domain operations**。
 
 ```text
+CloseMeeting command
+        ↓
+serialized mutation #1
+        ↓
+权限 / 状态检查
+        ↓
 BeginClose
 CREATED/ACTIVE → ENDING
+        ↓
 freeze close context
-schedule/execute FinalizeClose
+        ↓
+enqueue / schedule one internal FinalizeClose work item
+        ↓
+构造并返回：
+OK + CLOSE_STARTED + MeetingView(ENDING)
+
+---------------- command boundary ----------------
+
+FinalizeClose internal work item
+        ↓
+serialized mutation #2
+        ↓
+剩余 Binding 幂等 cleanup
+        ↓
+构造完整 ClosedMeetingSnapshot
+        ↓
+ENDING → CLOSED
+        ↓
+atomic publish CLOSED + Snapshot
+        ↓
+MeetingClosed exactly once
+        ↓
+释放活动 Meeting 聚合
 ```
 
-Response 正式定义为：
+二者可以使用同一个 LogicSystem single-writer queue，但**必须占据两个独立的逻辑 work item / queue turn**。
+
+#### 16.5.2 Response 的正式定义
 
 ```text
 result_code = OK
@@ -683,7 +754,95 @@ meeting_state = ENDING
 1. Step 1.3 已将 BeginClose 与 FinalizeClose 设计为两个逻辑阶段；
 2. Step 1.3 允许 `ENDING` 被 Query 观察；
 3. 若响应声称 `CLOSED`，会出现"响应表示已关闭但 `MeetingClosed` 尚未产生、快照尚未发布"的自相矛盾；
-4. 响应必须如实反映请求处理结束时聚合的真实稳定状态。
+4. Step 1.4 已冻结"Response 必须反映请求处理完成时的真实稳定状态"。
+
+推论的实现约束：既然已经冻结"首次 Close Response = `ENDING`"，那么实现模型就必须冻结为"BeginClose command 先返回，FinalizeClose 稍后发生"。**不得**在同一个 Close handler 中执行 `BeginClose → FinalizeClose → CLOSED` 后仍返回 `ENDING`。
+
+#### 16.5.3 不是新线程
+
+必须明确：上述模型**不意味着**：
+
+- 新建线程；
+- 后台线程池；
+- MQ；
+- timer thread；
+- detached task。
+
+Phase 1 可以继续使用：
+
+```text
+LogicSystem single worker
++
+serialized queue
+```
+
+只是 `CloseMeeting` 处理完成时再向**同一领域串行化入口**提交：
+
+```text
+FinalizeClose(meeting_id, frozen_close_context)
+```
+
+具体 C++ command 类型与 queue 表达留给 Step 1.6。
+
+### 16.5.4 CloseContext 最小关联语义
+
+由于 `MeetingClosed` 后续才产生，`FinalizeClose` 必须能保留产生终态事件所需的稳定上下文。设计层至少冻结：
+
+| 字段 | 用途 |
+| --- | --- |
+| `meeting_id` | 定位待关闭 Meeting |
+| `host_user_id` | 终态快照中的 Host 身份与事件 `actor_user_id` |
+| `owner_chat_server_id` | 事件与快照的归属节点 |
+| `originating_request_id` | 与最初 Close command 建立 correlation |
+| `close_started_at` 及必要时间戳 | `closed_at` 与审计 |
+| 历史 Participant 身份 | 组装 ClosedMeetingSnapshot（见 Step 1.2） |
+| 可通知 `session_id` 集合 | 关闭通知的目标集合 |
+
+`originating_request_id` 允许后续 `MeetingClosed` 与最初 Close command 建立 correlation，但它仍然**不是幂等键**。
+
+本 Step 不定义 C++ struct；上述仅为逻辑字段清单。
+
+### 16.5.5 重复 Close 在两个 work item 之间的行为
+
+若：
+
+```text
+CloseMeeting #1
+→ Meeting = ENDING
+→ FinalizeClose 已排队但尚未执行
+```
+
+此时第二个合法 Host Close：
+
+```text
+CLOSE_IN_PROGRESS
+```
+
+不得：
+
+- 再排一个 `FinalizeClose`；
+- 再冻结一次 CloseContext；
+- 重复通知；
+- 重复产生 `MeetingClosed`。
+
+因此必须满足：
+
+> **每个 Meeting 从 `CREATED`/`ACTIVE` 第一次进入 `ENDING` 时最多安排一个有效 `FinalizeClose`。**
+
+具体去重实现留给 Step 1.6。
+
+### 16.5.6 FinalizeClose 的失败边界
+
+本 Step 不设计复杂 retry，但必须保持 Step 1.3 的目标：
+
+```text
+ENDING 最终必须收敛 CLOSED
+```
+
+- 普通客户端通知失败**不得**阻止 `FinalizeClose`；
+- 不引入 MQ retry、durable job、distributed transaction 或 ACK protocol；
+- 内部不可恢复的不变量违例仍可归入 `INTERNAL_ERROR`；
+- `FinalizeClose` **不是**外部 API，因此**不**为客户端设计 `FinalizeCloseResponse`。
 
 后续 FinalizeClose 完成：
 
@@ -702,12 +861,13 @@ MeetingClosed
 
 | 条件 | 结果 |
 | --- | --- |
+| Context 结构非法 | `INVALID_ARGUMENT` |
 | 未认证 | `AUTH_REQUIRED` |
 | Session 已 `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| `meeting_id` 缺失或非法 | `INVALID_ARGUMENT` |
+| `meeting_id` 缺失或语义非法（先于 lookup） | `INVALID_ARGUMENT` |
 | 本节点无记录且无可信异地 owner | `MEETING_NOT_FOUND` |
 | 可信 owner 为其他节点 | `MEETING_NOT_LOCAL` |
-| 会议存在但调用者非 Host | `PERMISSION_DENIED` |
+| 会议存在但调用者非 Host（含 `ENDING`/`CLOSED`） | `PERMISSION_DENIED` |
 
 ## 17. API 5：QueryMeeting
 
@@ -716,6 +876,8 @@ MeetingClosed
 | 字段 | 语义 | 必需 |
 | --- | --- | --- |
 | `meeting_id` | 目标 Meeting | 必需 |
+
+`meeting_id` 缺失或语义非法时，必须在 Meeting lookup 之前返回 `INVALID_ARGUMENT`（见 19.1.2 节）。本 API 不需要其他业务参数。
 
 ### 17.2 授权与来源
 
@@ -752,6 +914,19 @@ MeetingView
 
 QueryMeeting 不改变任何状态，不产生事件，不修改 ClosedSnapshot。
 
+### 17.5 错误
+
+| 条件 | 结果 |
+| --- | --- |
+| Context 结构非法 | `INVALID_ARGUMENT` |
+| 未认证 | `AUTH_REQUIRED` |
+| Session 已 `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
+| `meeting_id` 缺失或语义非法（先于 lookup） | `INVALID_ARGUMENT` |
+| 本节点无记录且无可信异地 owner | `MEETING_NOT_FOUND` |
+| 可信 owner 为其他节点 | `MEETING_NOT_LOCAL` |
+| 调用者无可见权限（含 CLOSED 下非历史成员） | `NOT_PARTICIPANT` |
+| Snapshot 已汰汰 | `MEETING_NOT_FOUND` |
+
 ## 18. API 6：ListParticipants
 
 ### 18.1 Request
@@ -759,6 +934,8 @@ QueryMeeting 不改变任何状态，不产生事件，不修改 ClosedSnapshot�
 | 字段 | 语义 | 必需 |
 | --- | --- | --- |
 | `meeting_id` | 目标 Meeting | 必需 |
+
+`meeting_id` 缺失或语义非法时，必须在 Meeting lookup 之前返回 `INVALID_ARGUMENT`（见 19.1.2 节）。本 API 不需要其他业务参数。
 
 ### 18.2 授权
 
@@ -796,17 +973,49 @@ QueryMeeting 不改变任何状态，不产生事件，不修改 ClosedSnapshot�
 
 ### 19.1 正式顺序
 
-继承 Step 1.3 的 `permission-before-idempotency`，并在本 Step 细化：
+继承 Step 1.3 的 `permission-before-idempotency`，并在本 Step 细化为八步：
 
 ```text
 1. Validate Request Context
 2. Validate Domain Session usability
-3. Resolve local Meeting / ClosedSnapshot / locality
-4. Perform resource-scoped authorization
-5. Evaluate current state and idempotency
-6. Apply mutation（command only）
-7. Produce response / event
+3. Validate API Arguments
+4. Resolve local Meeting / ClosedSnapshot / locality
+5. Perform resource-scoped authorization
+6. Evaluate state and idempotency
+7. Apply mutation
+8. Produce response / event
 ```
+
+与早期七步版本的差别：把 **API Arguments 校验**从 Request Context 中拆出，成为独立步骤 3，使其明确地位于资源 lookup 之前。
+
+### 19.1.1 Context invalid 与 payload invalid 的区分
+
+两类"非法"必须分开表达：
+
+| 类别 | 含义 | 示例 | 结果 |
+| --- | --- | --- | --- |
+| Request Context invalid | 服务端 adapter 无法形成必要的调用上下文 | 无法形成 `request_id`、`authenticated/session` 上下文、`handling_chat_server_id` | `INVALID_ARGUMENT` |
+| API Argument invalid | 该 API 的业务参数缺失或语义非法 | `meeting_id` 缺失或语义非法 | `INVALID_ARGUMENT` |
+
+说明：
+
+- 具体哪些情况代表 transport adapter bug 或 `INTERNAL_ERROR`，不在本次扩展；
+- 但**两类都属于 `INVALID_ARGUMENT`**，且都必须在资源 lookup 之前完成。
+
+### 19.1.2 API Argument 校验必须先于 Meeting lookup
+
+对于 `JoinMeeting`、`LeaveMeeting`、`CloseMeeting`、`QueryMeeting`、`ListParticipants`，`meeting_id` 都是必需业务字段。因此：
+
+```text
+meeting_id missing / semantically invalid
+→ INVALID_ARGUMENT
+```
+
+并且必须发生在 Meeting lookup **之前**。
+
+**不得**把一个缺失 `meeting_id` 的请求变成 `MEETING_NOT_FOUND`。
+
+`CreateMeeting` 没有业务 payload，因此不需要 `meeting_id` 检查。
 
 ### 19.2 与 Step 1.3 的关系说明
 
@@ -822,10 +1031,10 @@ Step 1.3 表达为：
 
 本 Step 需要补充说明"为了完成权限判断需要先读取资源"这一点：
 
-- 对于 **Host 权限**这类必须读取 Meeting 才能判断的权限，允许先完成**内部资源解析**（步骤 3）；
-- 但在对调用者暴露 `ALREADY_CLOSED` / `CLOSE_IN_PROGRESS` 之前，**必须**先完成 Host 授权（步骤 4）。
+- 对于 **Host 权限**这类必须读取 Meeting 才能判断的权限，允许先完成**内部资源解析**（步骤 4）；
+- 但在对调用者暴露 `ALREADY_CLOSED` / `CLOSE_IN_PROGRESS` 之前，**必须**先完成 Host 授权（步骤 5）。
 
-也就是说：步骤 3 的内部解析结果**不得**直接作为对外响应；步骤 4 是步骤 5 的前置。
+也就是说：步骤 4 的内部解析结果**不得**直接作为对外响应；步骤 5 是步骤 6 的前置。
 
 ### 19.3 关键示例
 
@@ -863,93 +1072,139 @@ flowchart TD
     C1 -- "否" --> C2["AUTH_REQUIRED"]
     C1 -- "是" --> C3{"未进入 CLOSING/CLOSED?"}
     C3 -- "否" --> C4["SESSION_STATE_REJECTED"]
-    C3 -- "是" --> D["3. Resolve local Meeting / ClosedSnapshot / locality"]
+    C3 -- "是" --> C5["3. Validate API Arguments"]
+    C5 --> C6{"meeting_id 存在且语义合法?"}
+    C6 -- "否" --> C7["INVALID_ARGUMENT"]
+    C6 -- "是" --> D["4. Resolve local Meeting / ClosedSnapshot / locality"]
     D --> D1{"本地存在?"}
     D1 -- "否" --> D2{"有可信异地 owner?"}
     D2 -- "有" --> D3["MEETING_NOT_LOCAL"]
     D2 -- "无" --> D4["MEETING_NOT_FOUND"]
-    D1 -- "是" --> E["4. Resource-scoped authorization"]
+    D1 -- "是" --> E["5. Resource-scoped authorization"]
     E --> E1{"授权通过?"}
     E1 -- "否" --> E2["PERMISSION_DENIED / NOT_PARTICIPANT"]
-    E1 -- "是" --> F["5. Evaluate state and idempotency"]
+    E1 -- "是" --> F["6. Evaluate state and idempotency"]
     F --> F1{"可执行?"}
     F1 -- "幂等命中" --> F2["IDEMPOTENT 结果"]
     F1 -- "状态不允许" --> F3["MEETING_STATE_REJECTED"]
-    F1 -- "可执行" --> G["6. Apply mutation"]
-    G --> H["7. Produce response / event"]
+    F1 -- "可执行" --> G["7. Apply mutation"]
+    G --> H["8. Produce response / event"]
 ```
+
+图中步骤 3 位于步骤 4 之前，与 19.1.2 节一致：参数校验不得被资源 lookup 掩盖。
+
+`CreateMeeting` 没有业务参数，因此其路径跳过步骤 3 的参数检查。
 
 该图只用于说明求值顺序，完整时序图由 Step 1.5 绘制。
 
 ## 20. 错误优先级矩阵
 
+### 20.0 公共前缀顺序
+
+所有带 `meeting_id` 的 API 共享同一前缀：
+
+```text
+Context structure
+→ Authentication / Session usability
+→ API argument validity
+→ Resource lookup / locality
+→ Authorization
+→ State / idempotency
+→ Mutation
+```
+
 ### 20.1 CloseMeeting
 
 | 顺序 | 条件 | 结果 |
 | --- | --- | --- |
-| 1 | 未认证 | `AUTH_REQUIRED` |
-| 2 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| 3 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
-| 4 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
-| 5 | Meeting 存在 + 调用者非 Host | `PERMISSION_DENIED` |
-| 6 | Host + `ENDING` | `CLOSE_IN_PROGRESS` |
-| 7 | Host + `CLOSED` | `ALREADY_CLOSED` |
-| 8 | Host + `CREATED`/`ACTIVE` | `OK`（`CLOSE_STARTED`） |
+| 1 | Context 结构非法 | `INVALID_ARGUMENT` |
+| 2 | 未认证 | `AUTH_REQUIRED` |
+| 3 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
+| 4 | `meeting_id` 缺失或语义非法 | `INVALID_ARGUMENT`（必须先于 Meeting lookup） |
+| 5 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
+| 6 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
+| 7 | Meeting 存在 + 调用者非 Host | `PERMISSION_DENIED` |
+| 8 | Host + `ENDING` | `CLOSE_IN_PROGRESS` |
+| 9 | Host + `CLOSED` | `ALREADY_CLOSED` |
+| 10 | Host + `CREATED`/`ACTIVE` | `OK`（`CLOSE_STARTED`） |
 
 ### 20.2 LeaveMeeting
 
 | 顺序 | 条件 | 结果 |
 | --- | --- | --- |
-| 1 | 未认证 | `AUTH_REQUIRED` |
-| 2 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| 3 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
-| 4 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
-| 5 | 调用者从未是该 Meeting Participant | `NOT_PARTICIPANT` |
-| 6 | Host + `CREATED`/`ACTIVE` | `HOST_MUST_CLOSE_MEETING` |
-| 7 | 当前 `ACTIVE` Participant + `CREATED`/`ACTIVE` | `OK`（`LEFT`） |
-| 8 | 已知历史 Participant 当前 `LEFT` + `CREATED`/`ACTIVE` | `ALREADY_LEFT` |
-| 9 | Host 或 Participant + `ENDING` | `MEETING_STATE_REJECTED` |
-| 10 | 已知历史 Participant + `CLOSED` | `ALREADY_LEFT` |
-| 11 | 从未加入 + `CLOSED` | `NOT_PARTICIPANT` |
+| 1 | Context 结构非法 | `INVALID_ARGUMENT` |
+| 2 | 未认证 | `AUTH_REQUIRED` |
+| 3 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
+| 4 | `meeting_id` 缺失或语义非法 | `INVALID_ARGUMENT`（必须先于 Meeting lookup） |
+| 5 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
+| 6 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
+| 7 | 调用者从未是该 Meeting Participant | `NOT_PARTICIPANT` |
+| 8 | Host + `CREATED`/`ACTIVE` | `HOST_MUST_CLOSE_MEETING` |
+| 9 | 当前 `ACTIVE` Participant + `CREATED`/`ACTIVE` | `OK`（`LEFT`） |
+| 10 | 已知历史 Participant 当前 `LEFT` + `CREATED`/`ACTIVE` | `ALREADY_LEFT` |
+| 11 | Host 或 Participant + `ENDING` | `MEETING_STATE_REJECTED` |
+| 12 | 已知历史 Participant + `CLOSED` | `ALREADY_LEFT` |
+| 13 | 从未加入 + `CLOSED` | `NOT_PARTICIPANT` |
 
 ### 20.3 JoinMeeting
 
 | 顺序 | 条件 | 结果 |
 | --- | --- | --- |
-| 1 | 未认证 | `AUTH_REQUIRED` |
-| 2 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| 3 | `meeting_id` 缺失或非法 | `INVALID_ARGUMENT` |
-| 4 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
-| 5 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
-| 6 | Meeting 为 `ENDING`/`CLOSED` | `MEETING_STATE_REJECTED` |
-| 7 | 不存在历史 Participant | `OK` + `NEW_PARTICIPANT` |
-| 8 | 历史 Participant 为 `LEFT` | `OK` + `REJOINED_PARTICIPANT` |
-| 9 | Participant 为 `ACTIVE` 且当前 Session 无有效 Binding | `OK` + `ADDITIONAL_SESSION_BOUND` |
-| 10 | Participant 为 `ACTIVE` 且当前 Session 已有有效 Binding | `ALREADY_JOINED` + `ALREADY_BOUND` |
+| 1 | Context 结构非法 | `INVALID_ARGUMENT` |
+| 2 | 未认证 | `AUTH_REQUIRED` |
+| 3 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
+| 4 | `meeting_id` 缺失或语义非法 | `INVALID_ARGUMENT`（必须先于 Meeting lookup） |
+| 5 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
+| 6 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
+| 7 | Meeting 为 `ENDING`/`CLOSED` | `MEETING_STATE_REJECTED` |
+| 8 | 不存在历史 Participant | `OK` + `NEW_PARTICIPANT` |
+| 9 | 历史 Participant 为 `LEFT` | `OK` + `REJOINED_PARTICIPANT` |
+| 10 | Participant 为 `ACTIVE` 且当前 Session 无有效 Binding | `OK` + `ADDITIONAL_SESSION_BOUND` |
+| 11 | Participant 为 `ACTIVE` 且当前 Session 已有有效 Binding | `ALREADY_JOINED` + `ALREADY_BOUND` |
 
 ### 20.4 QueryMeeting / ListParticipants
 
 | 顺序 | 条件 | 结果 |
 | --- | --- | --- |
-| 1 | 未认证 | `AUTH_REQUIRED` |
-| 2 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
-| 3 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
-| 4 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
-| 5 | `CREATED`/`ACTIVE`/`ENDING` 且调用者是 Host 或当前 `ACTIVE` Participant | `OK`（scope `CURRENT`） |
-| 6 | `CREATED`/`ACTIVE`/`ENDING` 且调用者是 `LEFT` 历史成员或从未加入 | `NOT_PARTICIPANT` |
-| 7 | `CLOSED` 且调用者是 Host 或历史 Participant | `OK`（scope `HISTORICAL`） |
-| 8 | `CLOSED` 且调用者从未加入 | `NOT_PARTICIPANT` |
-| 9 | Snapshot 已淘汰 | `MEETING_NOT_FOUND` |
+| 1 | Context 结构非法 | `INVALID_ARGUMENT` |
+| 2 | 未认证 | `AUTH_REQUIRED` |
+| 3 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
+| 4 | `meeting_id` 缺失或语义非法 | `INVALID_ARGUMENT`（必须先于 Meeting lookup） |
+| 5 | Meeting 不存在 + 有可信异地 owner | `MEETING_NOT_LOCAL` |
+| 6 | Meeting 不存在 + 无可信 owner | `MEETING_NOT_FOUND` |
+| 7 | `CREATED`/`ACTIVE`/`ENDING` 且调用者是 Host 或当前 `ACTIVE` Participant | `OK`（scope `CURRENT`） |
+| 8 | `CREATED`/`ACTIVE`/`ENDING` 且调用者是 `LEFT` 历史成员或从未加入 | `NOT_PARTICIPANT` |
+| 9 | `CLOSED` 且调用者是 Host 或历史 Participant | `OK`（scope `HISTORICAL`） |
+| 10 | `CLOSED` 且调用者从未加入 | `NOT_PARTICIPANT` |
+| 11 | Snapshot 已淘汰 | `MEETING_NOT_FOUND` |
 
-### 20.5 优先级原则小结
+### 20.5 CreateMeeting（无业务参数）
+
+| 顺序 | 条件 | 结果 |
+| --- | --- | --- |
+| 1 | Context 结构非法 | `INVALID_ARGUMENT` |
+| 2 | 未认证 | `AUTH_REQUIRED` |
+| 3 | Session `CLOSING`/`CLOSED` | `SESSION_STATE_REJECTED` |
+| 4 | 领域不变量破坏 | `INTERNAL_ERROR` |
+| 5 | 其余 | `OK` |
+
+### 20.6 优先级原则小结
 
 上述矩阵的共同前缀顺序为：
 
 ```text
-认证 → Session 可用性 → 参数合法性 → 资源定位 → locality → 权限 → 状态/幂等
+Context structure
+→ 认证 / Session 可用性
+→ API 参数合法性
+→ 资源定位 / locality
+→ 权限
+→ 状态 / 幂等
 ```
 
-其中"权限"永远早于"状态/幂等"的对外暴露。
+两条不得违反的规则：
+
+1. **参数校验先于资源 lookup**：缺失或非法的 `meeting_id` 必须得到 `INVALID_ARGUMENT`，不得表现为 `MEETING_NOT_FOUND`；
+2. **权限先于状态/幂等暴露**：例如非 Host + `CLOSED` + CloseMeeting 仍为 `PERMISSION_DENIED`。
 
 ## 21. Domain Event Contract
 
@@ -999,16 +1254,25 @@ flowchart TD
 | 事件 | meeting_state_after |
 | --- | --- |
 | `MeetingCreated` | `CREATED` |
-| `ParticipantJoined` | 可能为 `CREATED`（Host）或 `ACTIVE`（非 Host 首次激活后） |
+| `ParticipantJoined` | **固定为 `ACTIVE`** |
 | `ParticipantLeft` | 当前 Meeting 状态（不因成员离会而回退） |
 | `MeetingClosed` | `CLOSED` |
+
+对 `ParticipantJoined` 固定为 `ACTIVE` 的说明：
+
+1. `ParticipantJoined` 在 Phase 1 只能由 `JoinMeeting` 的 `NEW_PARTICIPANT` 或 `REJOINED_PARTICIPANT` 产生，即只能是非 Host 成员的激活；
+2. 第一名非 Host 成员的真实激活与 `CREATED → ACTIVE` 在**同一个 serialized mutation** 内完成，因此事件产生时 Meeting 已是 `ACTIVE`；
+3. 后续 Join 自然发生在已经 `ACTIVE` 的 Meeting 上；
+4. `LEFT` 后的 Re-Join 也只能发生在已经 `ACTIVE` 的 Meeting 上（Step 1.3 规定 `ACTIVE` 永不回退 `CREATED`）。
+
+因此 `meeting_state_after` **不得**出现“或 Host 场景下 `CREATED`”这类表达。
 
 ### 21.3 事件字段表
 
 | 事件 | event_type | actor_user_id | participant_user_id | meeting_state_after | request_id |
 | --- | --- | --- | --- | --- | --- |
 | 创建 | `MeetingCreated` | Host（必需） | 不强制 | `CREATED` | 外部命令触发时有 |
-| 加入 | `ParticipantJoined` | 该 User（Case A/B） | 该 User（必需） | `ACTIVE`（或 Host 场景下 `CREATED`） | 外部命令触发时有 |
+| 加入 | `ParticipantJoined` | 该 User（Case A/B） | 该 User（必需） | `ACTIVE`（固定） | 外部命令触发时有 |
 | 离开 | `ParticipantLeft` | 用户主动时为其 User；断线清理时可为空 | 该 User（必需） | 当前状态 | 用户主动时有；断线清理时为空 |
 | 关闭 | `MeetingClosed` | Host | 不强制 | `CLOSED` | Host Close 流程触发时有 |
 
@@ -1023,7 +1287,9 @@ flowchart TD
 
 ### 22.1 产生条件
 
-`CreateMeeting` 第一次成功时产生，恰好一次。
+`CreateMeeting` 第一次成功时产生，**恰好一次**。
+
+`CreateMeeting` **不产生** `ParticipantJoined`（见 13.3.1 节）。
 
 ### 22.2 最低语义
 
@@ -1041,26 +1307,48 @@ meeting_state_after = CREATED
 
 ### 23.1 产生条件
 
-只在成员激活时产生：
+**只可能由 `JoinMeeting` 的以下两种 outcome 产生：**
+
+```
+NEW_PARTICIPANT
+REJOINED_PARTICIPANT
+```
+
+即非 Host 用户的：
 
 ```text
 不存在 / LEFT → ACTIVE
 ```
 
-### 23.2 不产生的情形
+### 23.1.1 正式产生条件汇总
 
-| 情形 | 是否产生 |
+| 场景 | 是否产生 |
 | --- | --- |
-| Case C：新 Session Binding | 不产生 |
-| Case D：同 Session 重复 Join | 不产生 |
-| Host 的任意 Session 变化 | 不产生 |
-| 任何幂等命中路径 | 不产生 |
+| `JoinMeeting` → `NEW_PARTICIPANT` | 产生一次 |
+| `JoinMeeting` → `REJOINED_PARTICIPANT` | 产生一次（新 `event_id`） |
+| `CreateMeeting` 创建 Host | **不产生** |
+| Host 初始 Participant 建立 | **不产生** |
+| Host 初始 Binding 建立 | **不产生** |
+| Host additional Session binding | **不产生** |
+| 同 Session duplicate Join（`ALREADY_BOUND`） | **不产生** |
+| 普通 Participant additional Session binding（`ADDITIONAL_SESSION_BOUND`） | **不产生** |
+| 任何幂等命中路径 | **不产生** |
+
+### 23.2 meeting_state_after
+
+`ParticipantJoined.meeting_state_after` 在 Phase 1 中固定为：
+
+```text
+ACTIVE
+```
+
+不得表达为“`ACTIVE`（或 Host 场景下 `CREATED`）”。理由见 21.2 节。
 
 ### 23.3 Re-Join
 
 `LEFT` 后的 Re-Join 可以产生**新的** `ParticipantJoined`，并拥有**新的 `event_id`**。
 
-该事件表达"活动成员集合新增一名成员"，不是"该 User 历史上第一次加入"。同一 User 的多次 activation 通过 `event_id` 与时间区分，本 Step 不引入额外的 activation 版本字段（见第 25 节）。
+该事件表达"活动成员集合新增一名成员"，不是"该 User 历史上第一次加入"。同一 User 的多次 activation 通过 `event_id` 与时间区分，本 Step 不引入额外的 activation 版本字段（见第 28 节）。
 
 ## 24. ParticipantLeft
 
@@ -1212,12 +1500,12 @@ ClosedMeetingSnapshot 内部可继续保留可选 `snapshot_version` 概念，�
 
 | API | Required Context | Payload | Authorization | Allowed Meeting State | Success Result | Idempotent Result | Main Error | Produces Event |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `CreateMeeting` | 已认证 Session + 合法 context | 无业务字段 | 任意已认证用户 | 不适用（创建新会议） | `OK` + MeetingView + host ParticipantView | 无（重复 request_id 仍创建新会议） | `AUTH_REQUIRED` | `MeetingCreated` |
-| `JoinMeeting` | 已认证 Session + 合法 context | `meeting_id` | 任意已认证用户 | `CREATED` / `ACTIVE` | `OK` + `NEW_PARTICIPANT` / `REJOINED_PARTICIPANT` / `ADDITIONAL_SESSION_BOUND` | `ALREADY_JOINED` + `ALREADY_BOUND` | `MEETING_STATE_REJECTED` | `ParticipantJoined`（Case A/B） |
-| `LeaveMeeting` | 已认证 Session + 合法 context | `meeting_id` | 非 Host 的 Participant | `CREATED` / `ACTIVE`（`CLOSED` 仅幂等） | `OK` + `LEFT` | `ALREADY_LEFT` | `HOST_MUST_CLOSE_MEETING` / `NOT_PARTICIPANT` | `ParticipantLeft` |
-| `CloseMeeting` | 已认证 Session + 合法 context | `meeting_id` | 仅 Host | `CREATED` / `ACTIVE` | `OK` + `CLOSE_STARTED`（state `ENDING`） | `CLOSE_IN_PROGRESS` / `ALREADY_CLOSED` | `PERMISSION_DENIED` | 首次为无（FinalizeClose 后 `MeetingClosed`） |
-| `QueryMeeting` | 已认证 Session + 合法 context | `meeting_id` | Host 或成员（含 CLOSED 历史成员） | 全部（`CLOSED` 读 Snapshot） | `OK` + MeetingView | 无（只读） | `NOT_PARTICIPANT` | 无 |
-| `ListParticipants` | 已认证 Session + 合法 context | `meeting_id` | 同 QueryMeeting | 全部（`CLOSED` 读 Snapshot） | `OK` + MeetingView + scope + 列表 | 无（只读） | `NOT_PARTICIPANT` | 无 |
+| `CreateMeeting` | 已认证 Session + 合法 context | 无业务字段 | 任意已认证用户 | 不适用（创建新会议） | `OK` + MeetingView + host ParticipantView | 无（重复 request_id 仍创建新会议） | `AUTH_REQUIRED` | 仅 `MeetingCreated`（**不产生** `ParticipantJoined`） |
+| `JoinMeeting` | 已认证 Session + 合法 context | `meeting_id` | 任意已认证用户 | `CREATED` / `ACTIVE` | `OK` + `NEW_PARTICIPANT` / `REJOINED_PARTICIPANT` / `ADDITIONAL_SESSION_BOUND` | `ALREADY_JOINED` + `ALREADY_BOUND` | `INVALID_ARGUMENT` / `MEETING_STATE_REJECTED` | `ParticipantJoined`（仅 Case A/B） |
+| `LeaveMeeting` | 已认证 Session + 合法 context | `meeting_id` | 非 Host 的 Participant | `CREATED` / `ACTIVE`（`CLOSED` 仅幂等） | `OK` + `LEFT` | `ALREADY_LEFT` | `INVALID_ARGUMENT` / `HOST_MUST_CLOSE_MEETING` / `NOT_PARTICIPANT` | `ParticipantLeft` |
+| `CloseMeeting` | 已认证 Session + 合法 context | `meeting_id` | 仅 Host | `CREATED` / `ACTIVE` | `OK` + `CLOSE_STARTED`（state `ENDING`） | `CLOSE_IN_PROGRESS` / `ALREADY_CLOSED` | `INVALID_ARGUMENT` / `PERMISSION_DENIED` | 首次为无（FinalizeClose 后 `MeetingClosed`） |
+| `QueryMeeting` | 已认证 Session + 合法 context | `meeting_id` | Host 或成员（含 CLOSED 历史成员） | 全部（`CLOSED` 读 Snapshot） | `OK` + MeetingView | 无（只读） | `INVALID_ARGUMENT` / `NOT_PARTICIPANT` | 无 |
+| `ListParticipants` | 已认证 Session + 合法 context | `meeting_id` | 同 QueryMeeting | 全部（`CLOSED` 读 Snapshot） | `OK` + MeetingView + scope + 列表 | 无（只读） | `INVALID_ARGUMENT` / `NOT_PARTICIPANT` | 无 |
 
 ## 30. JoinOutcome 表
 
@@ -1325,6 +1613,68 @@ Finalize 完成      → 产生 MeetingClosed；meeting_state = CLOSED
 从未加入用户查询     → NOT_PARTICIPANT
 ```
 
+### Case 11：CreateMeeting 的事件集合
+
+```text
+CreateMeeting
+→ MeetingCreated exactly once
+→ 不产生 ParticipantJoined
+
+断言：
+  meeting_state = CREATED
+  Host Participant.participant_state = ACTIVE
+  事件集合中只有 MeetingCreated
+```
+
+### Case 12：Close 的两个 serialized work item
+
+```text
+CloseMeeting
+→ BeginClose
+→ ENDING
+→ 返回 OK + CLOSE_STARTED
+
+FinalizeClose 尚未执行期间：
+  → second Close
+  → CLOSE_IN_PROGRESS
+  → 不得安排第二个 FinalizeClose
+
+FinalizeClose 执行：
+→ CLOSED
+→ MeetingClosed exactly once
+
+再次 Close：
+→ ALREADY_CLOSED
+```
+
+断言：
+
+```text
+每个 Meeting 从 CREATED/ACTIVE 首次进入 ENDING 时
+最多存在一个有效 FinalizeClose work item
+MeetingClosed 全局只产生一次
+```
+
+### Case 13：Invalid meeting_id
+
+分别对以下 API 传入缺失或语义非法的 `meeting_id`：
+
+```text
+JoinMeeting
+LeaveMeeting
+CloseMeeting
+QueryMeeting
+ListParticipants
+```
+
+断言：
+
+```text
+全部返回 INVALID_ARGUMENT
+不得返回 MEETING_NOT_FOUND
+参数校验必须发生在 Meeting lookup 之前
+```
+
 ## 33. 留给 Step 1.5 的时序问题
 
 Step 1.4 只定义 Contract。Step 1.5 再绘制完整时序，包括：
@@ -1339,6 +1689,31 @@ Step 1.4 只定义 Contract。Step 1.5 再绘制完整时序，包括：
 - repeated Close；
 - Query CLOSED；
 - 非 owner 请求。
+
+### 33.1 Step 1.5 必须能画出的 Close 边界
+
+由于 16.5 节已冻结 BeginClose 与 FinalizeClose 为两个独立 work item，Step 1.5 的时序图必须能明确表达：
+
+```text
+Client CloseMeeting
+        ↓
+LogicSystem / MeetingDomain：BeginClose
+        ↑
+← ENDING Response
+
+MeetingDomain
+        ↓
+serialized queue: FinalizeClose
+
+later:
+FinalizeClose
+        ↓
+CLOSED
+        ↓
+MeetingClosed
+```
+
+如果 Step 1.4 不先冻结这个边界，Step 1.5 会产生歧义。该边界现已冻结。
 
 Step 1.4 不重复 Step 1.5 的时序图，只保留第 19.5 节的辅助求值顺序图。
 
@@ -1386,6 +1761,21 @@ Step 1.4 不重复 Step 1.5 的时序图，只保留第 19.5 节的辅助求值�
 
 本 Step 也不编写任何 Meeting C++ 实现代码，不修改任何源码、协议或工程配置。
 
+### 35.1 本次 Review Fix 明确不实现的内容
+
+本轮修正未引入、也未实现：
+
+- Meeting C++ 实现；
+- `FinalizeClose` 实现；
+- `LogicSystem` queue 修改；
+- internal command 类型；
+- MeetingRegistry / SessionRegistry；
+- 线程池；
+- MQ；
+- wire format。
+
+`CloseContext` 与 `FinalizeClose(meeting_id, frozen_close_context)` 在本 Step 中只是**设计层字段清单与逻辑边界**，不是 C++ 类型，也不代表已排队的 work item。
+
 ## 36. 验收标准
 
 完成本步骤应满足：
@@ -1408,3 +1798,24 @@ Step 1.4 不重复 Step 1.5 的时序图，只保留第 19.5 节的辅助求值�
 16. 不暴露任何内部对象（`CSession`、socket、容器地址、锁、数据库字段）。
 17. 文档为 UTF-8 编码，Markdown 与 Mermaid 围栏完整，表格列数一致。
 18. 本轮未修改 `.cpp`、`.h`、`.hpp`、`message.proto`、TCP message ID、Qt Client、工程文件、配置、Redis key、MySQL schema、README 以及 Step 1.1 / 1.2 / 1.3 文档。
+
+### 36.1 Review Fix 修正项验收（本文档修订后追加）
+
+| # | 修正项 | 验收依据 |
+| --- | --- | --- |
+| F1 | `CreateMeeting` 只产生 `MeetingCreated` | 13.3.1、22.1、29 节 |
+| F2 | `ParticipantJoined` 不由 Create / Host 初始 Participant / Host Binding / additional Session binding 产生 | 13.3.1、23.1.1 节 |
+| F3 | `ParticipantJoined` 只由 `NEW_PARTICIPANT` / `REJOINED_PARTICIPANT` 产生 | 23.1 节 |
+| F4 | `ParticipantJoined.meeting_state_after` 固定为 `ACTIVE` | 21.2、23.2 节 |
+| F5 | 首次 Close Response 仍为 `ENDING` / `CLOSE_STARTED` | 16.4、16.5.2 节 |
+| F6 | `FinalizeClose` 明确为后续独立 serialized work item | 16.5.1 节 |
+| F7 | 不存在"同一次 Close handler 立即 Finalize 后仍返回 ENDING"的表达 | 16.5.2 节末段 |
+| F8 | ENDING 期间重复 Host Close 为 `CLOSE_IN_PROGRESS` | 16.4、16.5.5 节 |
+| F9 | 每个 Meeting 最多安排一个有效 `FinalizeClose` | 16.5.5 节 |
+| F10 | 五个带 `meeting_id` 的 API 缺失或非法参数均为 `INVALID_ARGUMENT` | 13.6、14.1、14.6、15.1、15.3、16.7、17.1、17.5、18.1、18.5、19.1.2、20.1–20.4 节 |
+| F11 | 参数校验位于资源 lookup 之前 | 19.1、19.1.2、20.0、20.6 节 |
+| F12 | 非 Host 对 `CLOSED` 会议 Close 仍为 `PERMISSION_DENIED` | 16.2、16.4、16.7、19.3、20.1 节 |
+| F13 | ResultCode 数值未发生变化 | 第 10 节全表与修前一致（15 个，数值与名称均未改动） |
+| F14 | 未定义任何 wire format | 3.1、34 节 |
+| F15 | 测试场景共 13 个（新增 Case 11–13） | 第 32 节 |
+| F16 | Close 的 Begin/Finalize 边界已冻结，供 Step 1.5 直接绘制 | 16.5.1、33.1 节 |
