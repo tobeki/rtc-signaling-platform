@@ -276,8 +276,10 @@ ENDING  → CREATED
 | `ACTIVE` | Session Disconnect（内部清理） | 见第 13 节 | `ACTIVE`（不变） | 解除该 Session Binding；如为该 Participant 最后一个有效 Session 则成员数 −1 | 仅在真实 `ACTIVE → LEFT` 时产生一次 `ParticipantLeft` | 重复断线不重复事件；Host 不迁移、不产生事件 |
 | `ACTIVE` | Host BeginClose | 调用者已认证且为 Host | `ENDING` | 冻结关闭上下文 | 无 | 未认证返回 `AUTH_REQUIRED`；非 Host 返回 `PERMISSION_DENIED` |
 | `ACTIVE` | 所有非 Host Participant 离开 | 无 | `ACTIVE`（不变） | 成员数减少 | 视用例 | **不得**回退到 `CREATED` |
-| `CREATED` / `ACTIVE` | Join | 调用者已认证；会议为 `ENDING`/`CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED` |
-| `CREATED` / `ACTIVE` | LeaveMeeting（外部命令） | 调用者已认证；会议为 `ENDING`/`CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED`；不接受外部成员关系变更 |
+| `CREATED` / `ACTIVE` | Join | 调用者已认证；会议为 `ENDING` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED` |
+| `CREATED` / `ACTIVE` | Join | 调用者已认证；会议为 `CLOSED` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED`；CLOSED 不得重新激活 |
+| `CREATED` / `ACTIVE` | LeaveMeeting（外部命令） | 调用者已认证；会议为 `ENDING` | 不变 | 无 | 无 | `MEETING_STATE_REJECTED`；成员关系已冻结 |
+| `CREATED` / `ACTIVE` | LeaveMeeting（外部命令） | 调用者已认证；会议为 `CLOSED` | 不变 | 无 | 无 | 按 7.5 节身份矩阵：`ALREADY_LEFT` 或 `NOT_PARTICIPANT` |
 | `ENDING` | Join | 调用者已认证 | `ENDING`（不变） | 无 | 无 | `MEETING_STATE_REJECTED` |
 | `ENDING` | LeaveMeeting（外部命令） | 调用者已认证 | `ENDING`（不变） | 无 | 无 | `MEETING_STATE_REJECTED`；成员关系已冻结 |
 | `ENDING` | 内部幂等清理（Disconnect / Close cleanup） | 无（内部路径） | `ENDING`（不变） | 仅 Binding 幂等 `UNBOUND` | 无 | 幂等；不改变 membership，不产生 `ParticipantLeft` |
@@ -285,8 +287,9 @@ ENDING  → CREATED
 | `ENDING` | FinalizeClose | 快照已完整组装 | `CLOSED` | 安装快照、设置 `closed_at`、释放活动聚合 | `MeetingClosed` | 重复调用幂等，不重复事件 |
 | `CLOSED` | CloseMeeting | 调用者已认证且为 Host（顺序见 4.1 节） | `CLOSED`（不变） | 无 | 无 | `ALREADY_CLOSED`（幂等成功） |
 | `CLOSED` | CloseMeeting | 调用者已认证但**不是 Host** | `CLOSED`（不变） | 无 | 无 | **`PERMISSION_DENIED`**；不得因会议已关闭而返回 `ALREADY_CLOSED` |
-| `CLOSED` | 外部成员关系命令（Join / LeaveMeeting） | 调用者已认证 | `CLOSED`（不变） | 无 | 无 | 按 4.1 节顺序先判权限后判状态；拒绝且不得重新激活 |
-| `CLOSED` | 内部幂等清理 | 无（内部路径） | `CLOSED`（不变） | 仅 Binding 幂等 `UNBOUND` | 无 | 幂等；不改变 membership |
+| `CLOSED` | Join | 调用者已认证 | `CLOSED`（不变） | 无 | 无 | `MEETING_STATE_REJECTED`；Join 要求建立新 membership，CLOSED 不得重新激活 |
+| `CLOSED` | LeaveMeeting（外部命令） | 调用者已认证 | `CLOSED`（不变） | 无 | 无 | 按 7.5 节身份矩阵：历史 Host / 历史 Participant 返回 `ALREADY_LEFT`；从未加入返回 `NOT_PARTICIPANT` |
+| `CLOSED` | 内部幂等清理 | 无（内部路径） | `CLOSED`（不变） | 仅 Binding 幂等 `UNBOUND` | 无 | 幂等；不改变 membership，不改变 ClosedSnapshot |
 
 ### 7.4 `CLOSED` 状态下 CloseMeeting 的结果取决于权限
 
@@ -302,6 +305,55 @@ ENDING  → CREATED
 | 未认证 Session | 任意 | `AUTH_REQUIRED` |
 
 该规则继承 Step 1.1 的表述"非 Host 即使会议已经关闭，也必须按权限规则拒绝 CloseMeeting"。
+
+### 7.5 `CLOSED` 状态下 LeaveMeeting 的身份矩阵
+
+`CLOSED` + `LeaveMeeting` **不能**统一返回 `MEETING_STATE_REJECTED`，必须按调用者的历史身份求值：
+
+| 调用者在 `ClosedMeetingSnapshot` 中的身份 | 结果 | 状态变化 | 事件 |
+| --- | --- | --- | --- |
+| 历史 Host（`host_user_id`） | `ALREADY_LEFT`（`IDEMPOTENT`） | 无 | 无 |
+| 历史 Participant（`participant_identities` 中） | `ALREADY_LEFT`（`IDEMPOTENT`） | 无 | 无 |
+| 从未加入的用户 | `NOT_PARTICIPANT`（`ERROR`） | 无 | 无 |
+
+Meeting 始终保持 `CLOSED`。
+
+#### 7.5.1 为什么 `CLOSED` + Leave 返回 `ALREADY_LEFT` 不违反终态语义
+
+`ALREADY_LEFT` 在此处是一个 **read-only idempotent convergence result**：
+
+> 调用者要求达到的"已经离开会议"这一业务后置条件，在 `CLOSED` Meeting 中已经成立。
+
+它**绝不**表示允许 `CLOSED` Meeting 修改成员关系。该路径必须满足：
+
+```text
+Meeting state remains CLOSED
+ClosedMeetingSnapshot unchanged
+Participant history unchanged
+Binding unchanged
+participant_count unchanged
+no ParticipantLeft
+no other domain event
+no Meeting reactivation
+```
+
+即**禁止执行任何新的 cleanup mutation**。该结果只是对已成立后置条件的幂等确认，与 `ALREADY_CLOSED` 对 `CloseMeeting` 的作用是同一种语义形态。
+
+依据：Step 1.1 要求"重复 Leave 必须幂等，且必须区分'本次实际移除'与'已经不在会议中'"，并要求"CLOSED 状态收到 Leave 或清理回调时必须安全且幂等，不得重新打开 Meeting"。
+
+#### 7.5.2 `ENDING` 与 `CLOSED` 为何不同
+
+| 对比项 | `ENDING` | `CLOSED` |
+| --- | --- | --- |
+| 活动聚合是否存在 | 存在 | 已释放 |
+| membership 是否冻结 | 冻结中 | 已不存在 |
+| `FinalizeClose` 是否完成 | 未完成 | 已完成 |
+| 终态 Snapshot 是否权威 | 尚未发布 | 是 |
+| 外部 `LeaveMeeting` 结果 | `MEETING_STATE_REJECTED` | 历史身份 → `ALREADY_LEFT`；否则 `NOT_PARTICIPANT` |
+
+`ENDING` 期间关闭流程仍在进行，成员关系冻结且清理由关闭流程统一负责，因此外部 Leave 必须被拒绝。
+
+`CLOSED` 期间关闭流程已完成，终态 Snapshot 是权威事实来源，因此对 Snapshot 中可确认的历史身份，Leave 的幂等确认是安全的。
 
 ## 8. CREATED → ACTIVE 精确触发规则
 
@@ -436,6 +488,7 @@ Host：
 | `ACTIVE`（PARTICIPANT） | 最后一个有效 Session 断开 | 本 Meeting 中有效 Binding 数由 ≥1 变为 0 | `LEFT` | 全部 Binding UNBOUND；成员数 −1 | 本 Meeting 一次 `ParticipantLeft` | 重复断线不重复事件；同一 Session 跨多 Meeting 时各 Meeting 独立计数 |
 | `ACTIVE`（HOST） | 最后一个有效 Session 断开 | 有效 Binding 数变为 0 | `ACTIVE`（不变） | 仅解绑该 Session | 无 | 不得产生 `ParticipantLeft` |
 | `LEFT` | LeaveMeeting | 无 | `LEFT`（不变） | 无 | 无 | `ALREADY_LEFT`（幂等） |
+| `LEFT` | LeaveMeeting | Meeting 为 `CLOSED` 且调用者在 ClosedSnapshot 中 | `LEFT`（不变） | 无 | 无 | `ALREADY_LEFT`（幂等确认，不执行 cleanup mutation） |
 | `LEFT` | Join | Meeting 为 `CREATED`/`ACTIVE` | `ACTIVE` | Binding BOUND；成员数 +1 | `ParticipantJoined` | 视为新的 membership activation |
 | `LEFT` | Join | Meeting 为 `ENDING`/`CLOSED` | `LEFT`（不变） | 无 | 无 | `MEETING_STATE_REJECTED` |
 | `ACTIVE` / `LEFT` | Close 清理 | 会议已 `ENDING` | 冻结进快照 | Binding 幂等 UNBOUND | 无（由 `MeetingClosed` 表达） | 不产生逐成员 `ParticipantLeft` |
@@ -849,16 +902,22 @@ Participant 主动 Leave 是**逻辑 User 级会议离开**，不是只解绑发
 5. 产生一次 `ParticipantLeft`。
 6. 后续重复 Leave 不再修改状态、不重复产生事件，返回 `ALREADY_LEFT`。
 
-### 16.3 Host 的 Leave
+### 16.3 LeaveMeeting 的状态/身份矩阵
 
 | 调用者 | 目标会议状态 | 结果 |
 | --- | --- | --- |
 | Host | `CREATED` / `ACTIVE` | `HOST_MUST_CLOSE_MEETING`；不解绑 Host Binding、不改成员数、不改状态 |
-| Host | `ENDING` / `CLOSED` | `MEETING_STATE_REJECTED`；外部 Leave 不得改变成员关系 |
-| Participant | `CREATED` / `ACTIVE` | 正常执行第 16.2 节 |
-| Participant | `ENDING` / `CLOSED` | `MEETING_STATE_REJECTED`；成员关系已冻结，不接受外部变更 |
-| 未加入者 | 任意开放状态 | `NOT_PARTICIPANT` |
+| Host | `ENDING` | `MEETING_STATE_REJECTED`；外部 Leave 不得改变成员关系 |
+| Host | `CLOSED` | `ALREADY_LEFT`（幂等确认，无 mutation、无事件） |
+| Participant（当前 `ACTIVE`） | `CREATED` / `ACTIVE` | 正常执行第 16.2 节 |
+| Participant（已 `LEFT`） | `CREATED` / `ACTIVE` | `ALREADY_LEFT`（幂等，无事件） |
+| Participant（历史身份） | `ENDING` | `MEETING_STATE_REJECTED`；成员关系已冻结 |
+| Participant（历史身份，见 7.5 节） | `CLOSED` | `ALREADY_LEFT`（幂等确认，无 mutation、无事件） |
+| 从未加入者 | 任意开放状态（`CREATED` / `ACTIVE` / `ENDING`） | `NOT_PARTICIPANT` |
+| 从未加入者 | `CLOSED` | `NOT_PARTICIPANT` |
 | 未认证 Session | 任意 | `AUTH_REQUIRED` |
+
+其中 `ENDING` 一行与 `CLOSED` 一行的差异依据见 7.5.2 节。
 
 ### 16.4 外部 LeaveMeeting 与内部幂等清理的区别
 
@@ -866,14 +925,32 @@ Participant 主动 Leave 是**逻辑 User 级会议离开**，不是只解绑发
 
 | 对比项 | External LeaveMeeting command | Internal idempotent cleanup |
 | --- | --- | --- |
-| 主体 | 已认证 Session 发起的业务命令 | 领域内部路径（`SessionDisconnected`、Close cleanup、重复清理回调） |
+| 主体 | 已认证 Session 发起的业务命令 | 领域内部路径（`SessionDisconnected`、FinalizeClose cleanup、重复清理回调） |
 | 目标 | 逻辑 User 级会议离开 | 幂等解除 Binding / 完成已发生的离会收尾 |
-| `ENDING` 后是否允许 | **不允许**改变 membership | **允许**必要的幂等 `UNBOUND` |
+| `ENDING` 后行为 | **被拒绝**（`MEETING_STATE_REJECTED`），不改变 membership | **允许**必要的幂等 `UNBOUND` |
+| `CLOSED` 后行为 | **不执行任何 membership mutation**；历史身份返回 `ALREADY_LEFT`，从未加入返回 `NOT_PARTICIPANT` | 仅允许安全的幂等收尾，不得改变 membership 或 Snapshot |
 | 是否产生 `ParticipantLeft` | 仅在真实 `ACTIVE → LEFT` 时产生一次 | 不产生（关闭流程由一次 `MeetingClosed` 表达；重复清理不产生） |
 | 是否改成员数 | 真实离会时减一次 | 不改（仅当真实 `ACTIVE → LEFT` 由该路径首次达成时才减） |
 | 对外结果 | 受权限与状态规则约束的错误或幂等结果 | 不对外返回结果 |
 
-因此文档中不再使用没有主体的"拒绝或幂等清理"来描述一个外部 Leave API 的直接结果：**外部 `LeaveMeeting` 在 `ENDING`/`CLOSED` 上就是拒绝**；幂等清理只属于内部路径。
+因此文档中不再使用没有主体的"拒绝或幂等清理"来描述一个外部 Leave API 的直接结果。正式表述为：
+
+```text
+ENDING:
+  external LeaveMeeting 被拒绝（MEETING_STATE_REJECTED）；
+  internal cleanup 可以执行必要的幂等 Binding cleanup。
+
+CLOSED:
+  external LeaveMeeting 不执行任何 membership mutation；
+  历史 Host / 历史 Participant 返回 ALREADY_LEFT；
+  从未加入用户返回 NOT_PARTICIPANT；
+  CLOSED 的 internal cleanup 仍只能是安全的幂等收尾，
+  不得改变 membership 或 ClosedMeetingSnapshot。
+```
+
+特别强调：
+
+> **`ALREADY_LEFT` 不是 internal cleanup。** 它是外部 API 返回的幂等结果，只是不伴随任何 mutation。
 
 ### 16.5 共享幂等移除语义
 
@@ -1167,7 +1244,12 @@ flowchart TD
     E2 -- "是" --> E4{"该 Session 已有效绑定?"}
     E4 -- "是" --> E5["Case B: 幂等"]
     E4 -- "否" --> E6["Case C: 增 Binding"]
-    D -- "Leave" --> F{"调用者是 Host 且会议开放?"}
+    D -- "Leave" --> F0{"Meeting 状态?"}
+    F0 -- "ENDING" --> F0a["MEETING_STATE_REJECTED<br/>成员关系已冻结"]
+    F0 -- "CLOSED" --> F0b{"调用者在 ClosedSnapshot 中<br/>为历史 Host / 历史 Participant?"}
+    F0b -- "是" --> F0c["ALREADY_LEFT（幂等确认）<br/>无 mutation，无事件"]
+    F0b -- "否" --> F0d["NOT_PARTICIPANT"]
+    F0 -- "CREATED / ACTIVE" --> F{"调用者是 Host?"}
     F -- "是" --> F1["HOST_MUST_CLOSE_MEETING"]
     F -- "否" --> F2{"Participant 为 ACTIVE?"}
     F2 -- "是" --> F3["ACTIVE → LEFT<br/>一次 ParticipantLeft"]
@@ -1198,7 +1280,8 @@ flowchart TD
 4. **认证与权限先于幂等结果。** 任何请求均按 4.1 节的顺序求值；不得因资源已处于终态而跳过权限判定。
 5. **幂等路径不产生事件。** 只有真实转换产生事件。
 6. **`ENDING` 是硬边界。** 进入 `ENDING` 后一切**外部**成员关系变更停止；**内部**幂等清理不受此限，但不得改变 membership。
-7. **fan-out 之间相互独立。** 一次 `SessionDisconnected` 引起的多个 Meeting 裁决彼此不影响，各自遵循上述原则。
+7. **`CLOSED` 下外部 Leave 只是幂等确认。** 历史身份得到 `ALREADY_LEFT`，从未加入得到 `NOT_PARTICIPANT`；两者均不得触发任何 membership mutation 或 Snapshot 修改。
+8. **fan-out 之间相互独立。** 一次 `SessionDisconnected` 引起的多个 Meeting 裁决彼此不影响，各自遵循上述原则。
 
 ## 22. Query 一致性
 
@@ -1342,6 +1425,30 @@ Host、Meeting 为 ENDING → CLOSE_IN_PROGRESS
 未认证、任意状态       → AUTH_REQUIRED
 ```
 
+#### Case 6：CLOSED 下 LeaveMeeting 的身份区分
+
+```text
+Case A: Host + CREATED + Leave        → HOST_MUST_CLOSE_MEETING
+Case B: Host + ENDING + Leave         → MEETING_STATE_REJECTED
+Case C: Host + CLOSED + Leave         → ALREADY_LEFT
+Case D: historical non-Host Participant + CLOSED + Leave → ALREADY_LEFT
+Case E: never-participant + CLOSED + Leave               → NOT_PARTICIPANT
+Case F: CLOSED + Join                                     → MEETING_STATE_REJECTED
+```
+
+Case C / D / E / F 必须同时满足：
+
+```text
+Meeting remains CLOSED
+ClosedMeetingSnapshot unchanged
+Participant history unchanged
+Binding unchanged
+participant_count unchanged
+no ParticipantLeft
+no other domain event
+no Meeting reactivation
+```
+
 ## 24. 非法状态转换
 
 ### 24.1 Session
@@ -1371,9 +1478,10 @@ Host、Meeting 为 ENDING → CLOSE_IN_PROGRESS
 | Current State | Trigger | 结果 |
 | --- | --- | --- |
 | `LEFT` | 在 `ENDING`/`CLOSED` 会议中转为 `ACTIVE` | 非法 |
-| `ACTIVE`（HOST） | Leave 转为 `LEFT` | 非法；返回 `HOST_MUST_CLOSE_MEETING` |
+| `ACTIVE`（HOST） | Leave 转为 `LEFT`（会议为 `CREATED`/`ACTIVE`） | 非法；返回 `HOST_MUST_CLOSE_MEETING` |
 | `ACTIVE`（HOST） | Disconnect 转为 `LEFT` | 非法；Host 身份保留 |
 | `LEFT` | Disconnect 清理再次转换 | 非法；只允许幂等清理 |
+| 任意 | 因 `CLOSED` + LeaveMeeting 而执行 membership mutation | 非法；`CLOSED` 下 Leave 仅返回幂等结果，不得改成员关系或 Snapshot |
 
 ### 24.4 Binding
 
@@ -1500,3 +1608,18 @@ Host、Meeting 为 ENDING → CLOSE_IN_PROGRESS
 | R12 | 外部 `LeaveMeeting` 与内部幂等清理区分 | 16.4 节；7.3 节；17.1 节 |
 | R13 | 不再出现无主体的"拒绝或幂等清理"表述 | 全文检索该表述应仅出现在 16.4 节的否定说明中 |
 | R14 | 验证场景 Case 1–5 可从文档直接推导 | 23.4 节 |
+
+### 28.2 CLOSED LeaveMeeting 语义统一（Design Consistency Fix）
+
+| # | 修正项 | 验收依据 |
+| --- | --- | --- |
+| D1 | `CLOSED` + `LeaveMeeting` 按身份求值，不再统一返回 `MEETING_STATE_REJECTED` | 7.5 节身份矩阵；7.3 节对应行 |
+| D2 | 历史 Host + `CLOSED` + Leave → `ALREADY_LEFT` | 7.5 节；16.3 节对应行 |
+| D3 | 历史 Participant + `CLOSED` + Leave → `ALREADY_LEFT` | 7.5 节；16.3 节对应行 |
+| D4 | 从未加入 + `CLOSED` + Leave → `NOT_PARTICIPANT` | 7.5 节；16.3 节对应行 |
+| D5 | `ALREADY_LEFT` 被明确为 read-only idempotent convergence result，禁止任何 mutation | 7.5.1 节无 mutation 清单；16.4 节对照表；21.3 节原则 7 |
+| D6 | `ENDING` + external Leave 仍为 `MEETING_STATE_REJECTED`（未改变） | 7.5.2 节对比表；7.3 节；16.3 节 |
+| D7 | `CLOSED` + Join 仍为 `MEETING_STATE_REJECTED`（未放宽） | 7.3 节对应行；9.5 节 |
+| D8 | `CLOSED` Leave 不产生 `ParticipantLeft` | 19.3 节；7.5.1 节 |
+| D9 | 新增验证场景 Case 6 覆盖 Case A–F | 23.4 节 Case 6 |
+| D10 | 未引入任何新 ResultCode | 第 20 节错误语义表沿用 Step 1.1 / 1.4 已冻结名称 |

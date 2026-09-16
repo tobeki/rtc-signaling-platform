@@ -19,7 +19,7 @@
 | Step 1.4 | `MeetingRequestContext`、`request_id` correlation-only、ResultCode、JoinOutcome、Leave 语义、BeginClose/FinalizeClose 两 work item、Event Contract、CLOSED Snapshot API |
 | Step 1.4 Review Fix | Create 只产生 `MeetingCreated`、`ParticipantJoined.meeting_state_after = ACTIVE`、八步求值顺序、`INVALID_ARGUMENT` 优先于 lookup |
 
-**本文不修改上述文档。** 若本文发现已有设计之间存在真实冲突，按下文 `Design Consistency Issue` 记录，不自行发明第三种答案。
+**本文不修改 Step 1.1–1.4 文档。** 若发现已有设计之间存在真实冲突，按第 26 节 `Design Consistency Resolution Record` 记录并等待指挥官裁决，不自行发明第三种答案。
 
 ## 3. 当前实现与目标设计组件说明
 
@@ -86,7 +86,7 @@ FinalizeClose internal work item
 - 领域事件与网络通知在图中分开表达（见第 21 节）。
 - 每张图只画对该时序最重要的错误路径；**完整错误矩阵以 Step 1.4 第 20 节为权威来源**。
 
-### 4.3 Design Consistency Issue 标记
+### 4.3 Design Consistency Resolution Record 标记
 
 若某处发现已有文档之间存在真实冲突，本文使用如下标记：
 
@@ -94,7 +94,7 @@ FinalizeClose internal work item
 [Design Consistency Issue #N]
 ```
 
-并在第 26 节集中记录来源章节与冲突点，不做单方面裁决。
+并在第 26 节集中记录来源章节、原规则、最终裁决、裁决依据与修正位置。已解决的条目保留完整过程并标记 **superseded / resolved**，避免被误读为当前契约。
 
 ### 4.4 Target Phase 1 Concept 标记
 
@@ -411,14 +411,18 @@ sequenceDiagram
                 M-->>A: ALREADY_LEFT
             else Meeting 为 ENDING
                 M-->>A: MEETING_STATE_REJECTED
-            else Meeting 为 CLOSED
-                M-->>A: ALREADY_LEFT 或 MEETING_STATE_REJECTED
-                Note over M: 见 Design Consistency Issue #1
+                Note over M: 成员关系已冻结<br/>内部 cleanup 不属于该 API
+            else Meeting 为 CLOSED 且调用者在 ClosedSnapshot 中为历史 Host / 历史 Participant
+                Note over M,E: 不执行任何 mutation<br/>no Binding change<br/>no Participant change<br/>no count change<br/>no ParticipantLeft<br/>no Meeting state change
+                M-->>A: ALREADY_LEFT
+                Note over M: read-only idempotent convergence result
             end
         end
     end
     A-->>C: response
 ```
+
+`CLOSED` + 从未加入的用户已在 authorization 分支处理为 `NOT_PARTICIPANT`，因此该图中 CLOSED 合法历史调用者分支只需要返回 `ALREADY_LEFT`。
 
 ### 11.1 关键断言
 
@@ -426,18 +430,55 @@ sequenceDiagram
 | --- | --- |
 | Leave 是 **User 级**离会，解除该 User 在**本 Meeting 下全部** Binding | Step 1.3 §16.2、Step 1.4 §15.5 |
 | 成员数只减一次，事件只产生一次 | Step 1.3 §16.2 |
-| Host 调用不改状态、不解绑 Binding | Step 1.3 §16.3、Step 1.4 §15.3 |
+| Host 对开放会议调用不改状态、不解绑 Binding | Step 1.3 §16.3、Step 1.4 §15.3 |
+| `ENDING` + external Leave 一律 `MEETING_STATE_REJECTED` | Step 1.3 §7.5.2、§16.3 |
+| `CLOSED` + 历史 Host / 历史 Participant → `ALREADY_LEFT` | Step 1.3 §7.5、Step 1.4 §15.3 |
+| `CLOSED` + 从未加入 → `NOT_PARTICIPANT` | Step 1.3 §7.5、Step 1.4 §15.3 |
 | `ALREADY_LEFT` 与 `NOT_PARTICIPANT` 严格区分 | Step 1.4 §15.4 |
-| 测试场景对应 | Step 1.4 §32 Case 4 前半 |
+| 测试场景对应 | Step 1.4 §32 Case 4 前半、Step 1.3 §23.4 Case 6 |
 
-### 11.2 外部 Leave 与内部 cleanup 的区别
+### 11.2 LeaveMeeting 的状态/身份矩阵
+
+| Meeting 状态 | 调用者身份 | 结果 | mutation | 事件 |
+| --- | --- | --- | --- | --- |
+| `CREATED` / `ACTIVE` | Host | `HOST_MUST_CLOSE_MEETING` | 无 | 无 |
+| `CREATED` / `ACTIVE` | 当前 `ACTIVE` Participant | `OK` + `LEFT` | `ACTIVE → LEFT`；全部 Binding `UNBOUND`；count −1 | `ParticipantLeft` ×1 |
+| `CREATED` / `ACTIVE` | 已 `LEFT` 的历史 Participant | `ALREADY_LEFT` | 无 | 无 |
+| `CREATED` / `ACTIVE` | 从未加入 | `NOT_PARTICIPANT` | 无 | 无 |
+| `ENDING` | Host 或历史 Participant | `MEETING_STATE_REJECTED` | 无 | 无 |
+| `CLOSED` | 历史 Host / 历史 Participant | `ALREADY_LEFT` | **无**（read-only convergence） | 无 |
+| `CLOSED` | 从未加入 | `NOT_PARTICIPANT` | 无 | 无 |
+
+### 11.3 为什么 `CLOSED` 返回 `ALREADY_LEFT` 不违反终态
+
+`ALREADY_LEFT` 是 **read-only idempotent convergence result**：调用者要求达到的"已经离开会议"这一后置条件，在 `CLOSED` Meeting 中已经成立。
+
+它**绝不**表示允许 `CLOSED` Meeting 修改成员关系。该路径必须满足：
+
+```text
+Meeting state remains CLOSED
+ClosedMeetingSnapshot unchanged
+Participant history unchanged
+Binding unchanged
+participant_count unchanged
+no ParticipantLeft
+no other domain event
+no Meeting reactivation
+```
+
+即**禁止执行任何新的 cleanup mutation**。详见 Step 1.3 §7.5.1。
+
+### 11.4 外部 Leave 与内部 cleanup 的区别
 
 | 对比项 | External `LeaveMeeting`（本节） | Internal cleanup（第 12、13 节） |
 | --- | --- | --- |
-| 触发者 | 已认证 Session 发起的业务命令 | 网络断线事件、Close 清理 |
-| `ENDING` 下是否改变 membership | **不允许** | 允许必要的幂等 `UNBOUND`，但不改 membership |
+| 触发者 | 已认证 Session 发起的业务命令 | 网络断线事件、FinalizeClose cleanup |
+| `ENDING` 下行为 | **被拒绝**（`MEETING_STATE_REJECTED`） | 允许必要的幂等 `UNBOUND`，但不改 membership |
+| `CLOSED` 下行为 | 无任何 membership mutation；历史身份 `ALREADY_LEFT`，否则 `NOT_PARTICIPANT` | 仅安全的幂等收尾，不得改变 membership 或 Snapshot |
 | 是否产生 `ParticipantLeft` | 真实 `ACTIVE → LEFT` 时一次 | 仅当首次真实达成该转换时；关闭清理不产生 |
 | 是否有 Response | 有 | 无外部 Response |
+
+特别强调：`ALREADY_LEFT` **不是** internal cleanup，而是外部 API 返回的幂等结果，只是不伴随任何 mutation。
 
 ## 12. Sequence 7：SessionDisconnected fan-out
 
@@ -1015,6 +1056,8 @@ Meeting 已 CLOSED 但 Snapshot 只组装了一半
 | 11 | Repeated Close（`ENDING`、Host） | Meeting `ENDING` | 无 | 不变 | 无 | `CLOSE_IN_PROGRESS` |
 | 12 | Repeated Close（`CLOSED`、Host） | Meeting `CLOSED` | 无 | 不变 | 无 | `ALREADY_CLOSED` + terminal MeetingView |
 | 13 | CLOSED Query（历史成员） | `CLOSED` + Snapshot 存在 | 无（只读） | 不变 | 无 | `OK` + MeetingView(`CLOSED`) |
+| 14 | CLOSED Leave（历史 Host / 历史 Participant） | `CLOSED` + Snapshot 存在 | **无**（read-only convergence） | 不变 | 无 | `ALREADY_LEFT` |
+| 15 | CLOSED Leave（从未加入） | `CLOSED` + Snapshot 存在 | 无 | 不变 | 无 | `NOT_PARTICIPANT` |
 
 ## 25. Phase 1 不实现的通信路径
 
@@ -1034,36 +1077,211 @@ Meeting 已 CLOSED 但 Snapshot 只组装了一半
 
 上述能力的后续演进只作为方向记录，**不出现在主执行时序图中**。
 
-## 26. Design Consistency Issue
+## 26. Design Consistency Resolution Record
 
-### Issue #1：`Host + CLOSED + LeaveMeeting` 的结果存在两处不同定义
+本节记录 Step 1.5 在串联时序时发现的设计不一致、指挥官裁决与修正落点。已解决的条目保留完整过程，便于追溯；文中引用的旧规则一律标记为 **superseded / resolved**，**不得**被误读为当前契约。
+
+### 26.0 当前有效规则一览
+
+以下为修正后的**当前有效**规则：
+
+```text
+CLOSED + historical Participant / Host + LeaveMeeting
+→ ALREADY_LEFT（ResultCode 101, IDEMPOTENT）
+
+CLOSED + never-participant + LeaveMeeting
+→ NOT_PARTICIPANT
+
+ENDING + external LeaveMeeting
+→ MEETING_STATE_REJECTED
+
+CLOSED + JoinMeeting
+→ MEETING_STATE_REJECTED
+```
+
+### 26.1 Issue #1：`Host + CLOSED + LeaveMeeting` 的结果存在两处不同定义
+
+#### 状态
+
+**Resolved**（指挥官已裁决）
+
+#### Issue 来源
+
+Step 1.5 在绘制 Sequence 6（LeaveMeeting）时，串联 Step 1.3 与 Step 1.4 的状态规则，发现同一请求在两份文档中给出不同结果。
+
+#### Step 1.3 原规则（**superseded / resolved**）
+
+| 来源 | 原定义 |
+| --- | --- |
+| Step 1.3 §7.3（Meeting 转换表） | `CLOSED` + 外部成员关系命令（Join / LeaveMeeting）→ "拒绝且不得重新激活" |
+| Step 1.3 §16.3（Host 的 Leave） | Host + `ENDING` / `CLOSED` → `MEETING_STATE_REJECTED` |
+| Step 1.3 §16.4 | "外部 `LeaveMeeting` 在 `ENDING`/`CLOSED` 上就是拒绝" |
+
+**失效点**：把 `ENDING` 与 `CLOSED` 合并处理，未区分"关闭进行中"与"关闭已完成"两种状态。
+
+#### Step 1.4 原规则（保留，视为对 Step 1.1 的 API 具体化）
 
 | 来源 | 定义 |
 | --- | --- |
-| Step 1.3 §16.3（Host 的 Leave 表） | Host 对 `ENDING` **/** `CLOSED` → `MEETING_STATE_REJECTED` |
 | Step 1.4 §15.3（Leave 语义表） | Host 对 `CLOSED` → `ALREADY_LEFT`（`IDEMPOTENT`） |
 | Step 1.4 §15.7 | 调用者是 ClosedSnapshot 中的历史 Participant **或 Host**：`ALREADY_LEFT` |
 
-**冲突点**：同一个 `Host + CLOSED + LeaveMeeting` 请求，Step 1.3 给出 `MEETING_STATE_REJECTED`（`ERROR`），Step 1.4 给出 `ALREADY_LEFT`（`IDEMPOTENT`）。
+#### 冲突点
+
+同一个 `Host + CLOSED + LeaveMeeting` 请求：Step 1.3 给出 `MEETING_STATE_REJECTED`（`ERROR`），Step 1.4 给出 `ALREADY_LEFT`（`IDEMPOTENT`）。
 
 **相关但一致的部分**：Host + `ENDING` + Leave 在两份文档中均为 `MEETING_STATE_REJECTED`，无冲突。
 
-**可参考的既有倾向**：
+#### 最终裁决
 
-- Step 1.1 §11.6 要求"CLOSED 状态下收到 Leave 或清理回调时，操作必须安全且幂等；不重新打开会议"，倾向幂等；
-- Step 1.1 §11.2 要求响应能区分"本次实际移除"与"已经不在会议中"，倾向 `ALREADY_LEFT`；
-- Step 1.3 §7.3 中 `CLOSED` + 外部成员关系命令一行表述为"拒绝且不得重新激活"，倾向拒绝。
+```text
+ENDING + external LeaveMeeting
+→ MEETING_STATE_REJECTED
 
-**本文处理方式**：第 11 节 Sequence 6 在该分支同时标注两种结果并指向本 Issue，**不单方面裁决**。请指挥官确认后以版本化设计变更统一 Step 1.3 或 Step 1.4 的表述。
+CLOSED + historical Participant / Host + LeaveMeeting
+→ ALREADY_LEFT
 
-### Issue #2（非冲突，仅为澄清）：`CLOSED` + 非 Host 历史成员 Leave
+CLOSED + never-participant + LeaveMeeting
+→ NOT_PARTICIPANT
+```
 
-| 来源 | 定义 |
+其中 `ALREADY_LEFT` 沿用 Step 1.4 已冻结定义：`ResultCode = 101`，`Disposition = IDEMPOTENT`。
+
+#### 裁决依据
+
+Step 1.1 已冻结以下业务原则：
+
+```text
+重复 Leave 必须幂等；
+必须区分"本次实际移除"和"已经不在会议中"。
+
+CLOSED 状态收到 Leave 或清理回调时：
+必须安全且幂等；
+不得重新打开 Meeting。
+```
+
+角色规则还明确：
+
+```text
+Host:
+开放状态 Leave 被拒绝；
+关闭后只做幂等清理语义。
+```
+
+因此 Step 1.4 的 `历史 Participant / Host + CLOSED → ALREADY_LEFT` 属于对 Step 1.1 需求的 API 具体化；Step 1.3 中 `ENDING / CLOSED → MEETING_STATE_REJECTED` 是过早将两种状态合并处理，应予以细化。
+
+#### 核心语义：`ALREADY_LEFT` 是 read-only idempotent convergence result
+
+`CLOSED + LeaveMeeting → ALREADY_LEFT` **绝不**表示允许 `CLOSED` Meeting 修改成员关系。它只表达：
+
+> 调用者要求达到的"已经离开会议"这一业务后置条件，在 `CLOSED` Meeting 中已经成立。
+
+因此该路径必须满足：
+
+```text
+Meeting state remains CLOSED
+ClosedMeetingSnapshot unchanged
+Participant history unchanged
+Binding unchanged
+participant_count unchanged
+no ParticipantLeft
+no other domain event
+no Meeting reactivation
+```
+
+即**禁止执行任何新的 cleanup mutation**。
+
+#### 为什么 `ENDING` 与 `CLOSED` 不同
+
+| 对比项 | `ENDING` | `CLOSED` |
+| --- | --- | --- |
+| 活动聚合是否存在 | 存在 | 已释放 |
+| membership 是否冻结 | 冻结中 | 已不存在 |
+| `FinalizeClose` 是否完成 | 未完成 | 已完成 |
+| 终态 Snapshot 是否权威 | 尚未发布 | 是 |
+| 外部 `LeaveMeeting` 结果 | `MEETING_STATE_REJECTED` | 历史身份 → `ALREADY_LEFT`；否则 `NOT_PARTICIPANT` |
+
+`ENDING` 期间关闭流程仍在进行，清理由关闭流程统一负责，因此外部 Leave 必须被拒绝。`CLOSED` 期间终态 Snapshot 是权威事实来源，对其中可确认的历史身份做幂等确认是安全的。
+
+#### 修正位置
+
+| 文件 | 章节 | 修正内容 |
+| --- | --- | --- |
+| `STEP-1.3-state-machines.md` | §7.3 | 拆分 `CLOSED` 下的 Join 与 LeaveMeeting 行；拆分 `CREATED`/`ACTIVE` 下 `ENDING`/`CLOSED` 混合行 |
+| `STEP-1.3-state-machines.md` | §7.5（新增） | `CLOSED` 下 LeaveMeeting 身份矩阵；§7.5.1 read-only convergence 语义；§7.5.2 `ENDING`/`CLOSED` 对比 |
+| `STEP-1.3-state-machines.md` | §9.5 | 增加 `LEFT` + `CLOSED` + Leave 行 |
+| `STEP-1.3-state-machines.md` | §16.3 | 重写为完整状态/身份矩阵，拆分 `ENDING` 与 `CLOSED` |
+| `STEP-1.3-state-machines.md` | §16.4 | 重写对照表；正式表述 `ENDING` 拒绝、`CLOSED` 幂等确认、`ALREADY_LEFT` 不是 internal cleanup |
+| `STEP-1.3-state-machines.md` | §21.2 | Leave 分支 Mermaid 增加 Meeting 状态判定与 `CLOSED` 身份判定 |
+| `STEP-1.3-state-machines.md` | §21.3 | 新增原则 7（`CLOSED` 下外部 Leave 只是幂等确认） |
+| `STEP-1.3-state-machines.md` | §23.4 | 新增 Case 6（Case A–F 六场景） |
+| `STEP-1.3-state-machines.md` | §24.3 | 新增非法转换行：因 `CLOSED` Leave 执行 membership mutation |
+| `STEP-1.3-state-machines.md` | §28.2（新增） | Design Consistency Fix 验收表 D1–D10 |
+| `STEP-1.5-core-sequences.md` | §11 | Sequence 6 移除 unresolved 分支；新增 §11.2 状态/身份矩阵、§11.3 终态说明、§11.4 对照表 |
+| `STEP-1.5-core-sequences.md` | §24 | Trace 表新增 `CLOSED` Leave 行 |
+| `STEP-1.5-core-sequences.md` | §26 | 本节 |
+
+#### 未改变的行为
+
+以下规则在本次修正中**完全不变**：
+
+```text
+Host + CREATED/ACTIVE + Leave                → HOST_MUST_CLOSE_MEETING
+Participant ACTIVE + CREATED/ACTIVE + Leave  → OK + LEFT
+Participant already LEFT + open Meeting      → ALREADY_LEFT
+Host / Participant + ENDING + external Leave → MEETING_STATE_REJECTED
+CLOSED + Join                                → MEETING_STATE_REJECTED
+```
+
+不得因为本次修正放宽 `CLOSED` + Join。
+
+#### 不得产生 Event 的路径
+
+以下路径全部不得产生 `ParticipantLeft`：
+
+```text
+already LEFT + Leave
+Host open Meeting + Leave rejected
+ENDING + Leave rejected
+CLOSED + historical Participant/Host + Leave
+never Participant + Leave
+```
+
+只有真实 `ACTIVE → LEFT` 才产生 `ParticipantLeft`，且恰好一次。
+
+### 26.2 Issue #2：`CLOSED` + 非 Host 历史成员 Leave
+
+#### 状态
+
+**Resolved**（随 Issue #1 一并解决）
+
+#### Issue 来源
+
+Step 1.5 在绘制 Sequence 6 时，发现 Step 1.3 §7.3 的笼统表述"拒绝"与 Step 1.4 §15.3 的具体结果不一致。
+
+#### 原规则（**superseded / resolved**）
+
+| 来源 | 原定义 |
 | --- | --- |
 | Step 1.3 §7.3 | `CLOSED` + 外部成员关系命令 → "拒绝且不得重新激活" |
 | Step 1.4 §15.3 | 已知历史 Participant（非 Host）+ `CLOSED` → `ALREADY_LEFT` |
 
-该条与 Issue #1 属同一族语义分歧（"拒绝"与"幂等成功"的选择）。Step 1.4 作为 API 权威给出了具体结果码，Step 1.3 §7.3 的表述更笼统。本文按 Step 1.4 绘制，并在本表记录差异供统一。
+#### 最终裁决
+
+```text
+CLOSED + historical non-Host Participant + LeaveMeeting
+→ ALREADY_LEFT（ResultCode 101, IDEMPOTENT）
+```
+
+与 Issue #1 属同一族语义，统一按"历史身份 → 幂等确认，从未加入 → `NOT_PARTICIPANT`"处理。**不再保留为开放问题。**
+
+#### 修正位置
+
+与 Issue #1 相同（Step 1.3 §7.5、§16.3、§16.4；Step 1.5 §11）。
+
+### 26.3 开放问题
+
+无。截至本文修订，Issue #1 与 Issue #2 均已 Resolved。
 
 ## 27. 从时序推导出的 Step 1.6 编码输入
 
@@ -1125,9 +1343,10 @@ Meeting 已 CLOSED 但 Snapshot 只组装了一半
 14. 提供 Snapshot 发布路径图且顺序正确。
 15. 提供 Thread & Serialization View。
 16. 从时序提取 Step 1.6 编码输入清单。
-17. 若发现已有设计冲突，以 `Design Consistency Issue` 记录，不自行发明第三种答案。
+17. 若发现已有设计冲突，以第 26 节 `Design Consistency Resolution Record` 记录，不自行发明第三种答案。
 18. 文档为 UTF-8 编码，Markdown 与 Mermaid 围栏完整，表格列数一致。
 19. 本轮未修改任何 `.cpp`、`.h`、`.hpp`、`message.proto`、TCP message ID、Qt Client、工程文件、配置、Redis key、MySQL schema、README 以及 Step 1.1 / 1.2 / 1.3 / 1.4 文档。
+20. `CLOSED` + Leave 的历史身份分支返回 `ALREADY_LEFT`，从未加入返回 `NOT_PARTICIPANT`，且不产生任何 mutation 或事件（见 §11.2、§11.3）。
 
 ## 29. 关键断言核对表
 
@@ -1155,3 +1374,8 @@ Meeting 已 CLOSED 但 Snapshot 只组装了一半
 | 18 | Domain Event 不代表客户端一定收到 | Step 1.3 §19.5、Step 1.4 §21.4 | §21.3、§21.4 |
 | 19 | `request_id` 没有被用成 idempotency key | Step 1.4 §7 | Sequence 1 §6.2、§21.2 |
 | 20 | 不存在 wire format | Step 1.4 §3.1、§34 | §4.2、§25 |
+| 21 | `CLOSED` + 历史身份 + Leave → `ALREADY_LEFT`，无 mutation、无事件 | Step 1.3 §7.5 | §11 图、§11.2、§11.3、Trace 表第 14 行 |
+| 22 | `CLOSED` + 从未加入 + Leave → `NOT_PARTICIPANT` | Step 1.3 §7.5 | §11 图、§11.2、Trace 表第 15 行 |
+| 23 | `ENDING` + external Leave → `MEETING_STATE_REJECTED`（未改变） | Step 1.3 §7.5.2 | §11 图、§11.2、§11.4 |
+| 24 | `CLOSED` + Join → `MEETING_STATE_REJECTED`（未放宽） | Step 1.4 §14.4 | §11.2、§26.1 |
+| 25 | `ALREADY_LEFT` 不是 internal cleanup | Step 1.3 §16.4 | §11.4 |
