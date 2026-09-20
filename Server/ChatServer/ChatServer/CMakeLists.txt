@@ -7,6 +7,10 @@
 # Explicitly OUT of scope here:
 #   runtime deployment, service configuration, CI, Docker, Meeting features.
 #
+# Unit-test infrastructure (Phase 2, Step 2.5) is optional and lives under
+# tests/. It is enabled only when BUILD_TESTING is ON, so the application-only
+# build path never requires GoogleTest.
+#
 # This file is deliberately NOT referenced by ChatServer.vcxproj, so the proven
 # Windows + Visual Studio 2022 + Debug|x64 baseline is unaffected. The Windows
 # build keeps using its own generated protobuf/gRPC sources and its own
@@ -216,3 +220,25 @@ target_link_libraries(ChatServer PRIVATE
     gRPC::grpc++
     "${CHATSERVER_MYSQLCPPCONN_LIBRARY}"
 )
+
+# ------------------------------------------------------------------------------
+# Unit tests (Phase 2, Step 2.5).
+#
+# include(CTest) defines the standard BUILD_TESTING option (default ON) and
+# provides the "test" target driver for CTest.
+#
+# Everything test-related, including GoogleTest discovery, lives inside the
+# guard. A build-only configuration therefore stays valid without GoogleTest
+# installed:
+#
+#   cmake -S . -B <dir> -DBUILD_TESTING=OFF     # no GTest required
+#   cmake -S . -B <dir> -DBUILD_TESTING=ON      # tests + ctest
+#
+# No project-specific toggle such as CHATSERVER_ENABLE_TESTS is introduced: the
+# standard option is sufficient and keeps the invocation conventional.
+# ------------------------------------------------------------------------------
+include(CTest)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
