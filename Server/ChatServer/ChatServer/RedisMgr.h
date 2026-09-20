@@ -4,6 +4,8 @@
 #include <queue>
 #include <atomic>
 #include <mutex>
+#include <thread>
+#include <condition_variable>
 #include "Singleton.h"
 #include <cstring>
 
