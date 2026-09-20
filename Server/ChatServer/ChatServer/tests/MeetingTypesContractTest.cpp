@@ -232,6 +232,7 @@ TEST(MeetingTypesContract, OptionalFieldsDefaultToAbsent)
     const meeting::MeetingEvent event;
     EXPECT_FALSE(event.has_actor_user_id);       // 系统清理可能没有发起用户
     EXPECT_FALSE(event.has_participant_user_id); // 未必指向某个受影响成员
+    EXPECT_FALSE(event.has_request_id);          // request_id 是可选 correlation
 
     const meeting::ParticipantIdentitySnapshot identity;
     EXPECT_FALSE(identity.has_left_at);
@@ -306,10 +307,106 @@ TEST(MeetingTypesContract, EventCarriesContractFields)
     event.actor_user_id = 7;
     event.has_participant_user_id = true;
     event.participant_user_id = 8;
+    event.meeting_state_after = MeetingState::ACTIVE;
+    event.has_request_id = true;
+    event.request_id = "req-1";
     event.dedupe_context = "join:meeting-1:8";
 
     EXPECT_EQ(event.event_type, EventType::PARTICIPANT_JOINED);
     EXPECT_TRUE(event.has_actor_user_id);
     EXPECT_TRUE(event.has_participant_user_id);
     EXPECT_FALSE(event.dedupe_context.empty());
+
+    // Event Contract 必需字段：事件产生后的稳定状态。
+    EXPECT_EQ(event.meeting_state_after, MeetingState::ACTIVE);
+
+    // Event Contract 可选字段：request_id correlation（不是幂等键）。
+    EXPECT_TRUE(event.has_request_id);
+    EXPECT_EQ(event.request_id, std::string("req-1"));
+}
+
+// ------------------------------------------------------------------------------
+// 事件 shape 的类型层可表达性。
+//
+// 这两条只验证**类型契约**能表达 Phase 1 固定的事件语义，不涉及任何 aggregate
+// mutation（那属于 M2 的聚合测试）。
+// ------------------------------------------------------------------------------
+TEST(MeetingTypesContract, MeetingCreatedShapeCanExpressCreated)
+{
+    meeting::MeetingEvent created;
+    created.event_id = "evt-created";
+    created.event_type = EventType::MEETING_CREATED;
+    created.meeting_id = "meeting-shape";
+    created.owner_chat_server_id = "chat-shape";
+    created.has_actor_user_id = true; // actor = Host
+    created.actor_user_id = 7;
+    // MeetingCreated 不强制填写 participant_user_id。
+    created.meeting_state_after = MeetingState::CREATED;
+    created.has_request_id = true;
+    created.request_id = "req-create";
+
+    EXPECT_EQ(created.event_type, EventType::MEETING_CREATED);
+    EXPECT_EQ(created.meeting_state_after, MeetingState::CREATED);
+    EXPECT_TRUE(created.has_actor_user_id);
+    EXPECT_FALSE(created.has_participant_user_id);
+    EXPECT_TRUE(created.has_request_id);
+}
+
+TEST(MeetingTypesContract, ParticipantJoinedShapeCanExpressActive)
+{
+    meeting::MeetingEvent joined;
+    joined.event_id = "evt-joined";
+    joined.event_type = EventType::PARTICIPANT_JOINED;
+    joined.meeting_id = "meeting-shape";
+    joined.owner_chat_server_id = "chat-shape";
+    joined.has_actor_user_id = true;
+    joined.actor_user_id = 8;
+    joined.has_participant_user_id = true;
+    joined.participant_user_id = 8;
+    // ParticipantJoined 的 meeting_state_after 在 Phase 1 中固定为 ACTIVE。
+    joined.meeting_state_after = MeetingState::ACTIVE;
+    joined.has_request_id = true;
+    joined.request_id = "req-join";
+
+    EXPECT_EQ(joined.event_type, EventType::PARTICIPANT_JOINED);
+    EXPECT_EQ(joined.meeting_state_after, MeetingState::ACTIVE);
+    EXPECT_TRUE(joined.has_participant_user_id);
+    EXPECT_EQ(joined.participant_user_id, 8);
+    EXPECT_TRUE(joined.has_request_id);
+}
+
+TEST(MeetingTypesContract, ParticipantLeftShapeCanExpressCurrentState)
+{
+    meeting::MeetingEvent left;
+    left.event_id = "evt-left";
+    left.event_type = EventType::PARTICIPANT_LEFT;
+    left.meeting_id = "meeting-shape";
+    left.owner_chat_server_id = "chat-shape";
+    left.has_participant_user_id = true;
+    left.participant_user_id = 9;
+    // ParticipantLeft 的 meeting_state_after 是当前 Meeting 状态，不因离会回退。
+    left.meeting_state_after = MeetingState::ACTIVE;
+    // 内部触发（例如断线清理）时 request_id 可以为空。
+    EXPECT_FALSE(left.has_request_id);
+
+    EXPECT_EQ(left.event_type, EventType::PARTICIPANT_LEFT);
+    EXPECT_EQ(left.meeting_state_after, MeetingState::ACTIVE);
+    EXPECT_FALSE(left.has_request_id);
+}
+
+TEST(MeetingTypesContract, MeetingClosedShapeCanExpressClosed)
+{
+    meeting::MeetingEvent closed;
+    closed.event_id = "evt-closed";
+    closed.event_type = EventType::MEETING_CLOSED;
+    closed.meeting_id = "meeting-shape";
+    closed.owner_chat_server_id = "chat-shape";
+    closed.has_actor_user_id = true; // actor = Host
+    closed.actor_user_id = 7;
+    closed.meeting_state_after = MeetingState::CLOSED;
+    closed.has_request_id = true;
+    closed.request_id = "req-close";
+
+    EXPECT_EQ(closed.event_type, EventType::MEETING_CLOSED);
+    EXPECT_EQ(closed.meeting_state_after, MeetingState::CLOSED);
 }

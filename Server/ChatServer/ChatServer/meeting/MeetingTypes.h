@@ -316,6 +316,23 @@ struct MeetingEvent {
     ServerId owner_chat_server_id;
     Timestamp occurred_at;
 
+    // Event Contract 的必需字段（Step 1.4 §21.1）：表示**事件产生后**的 Meeting
+    // 稳定状态，不是事件产生前的状态。
+    // 取值规则（Step 1.4 §21.2 / §23.2）：MEETING_CREATED → CREATED；
+    // PARTICIPANT_JOINED → 固定为 ACTIVE；PARTICIPANT_LEFT → 当前 Meeting 状态；
+    // MEETING_CLOSED → CLOSED。
+    MeetingState meeting_state_after = MeetingState::CREATED;
+
+    // Event Contract 的可选 correlation 字段（Step 1.4 §21.1、§21.2）。
+    // 由某次**外部命令**直接触发的事件才携带对应 request_id；内部触发的事件
+    // （例如 SessionDisconnected 导致的 ParticipantLeft）可以为空，且**不得伪造**
+    // 一个客户端 request_id。
+    //
+    // request_id 只用于 correlation，**不是幂等键**；幂等判断依赖领域状态，
+    // 事件级去重的身份候选是 event_id。
+    bool has_request_id = false;
+    RequestId request_id;
+
     // 最小去重上下文；本文件不规定事件顺序或去重算法。
     std::string dedupe_context;
 };

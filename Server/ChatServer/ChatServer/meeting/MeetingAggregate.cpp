@@ -129,6 +129,8 @@ MeetingEvent MeetingAggregate::MakeEvent(EventType type, const EventId& event_id
                                          const Timestamp& occurred_at, bool has_actor,
                                          UserId actor_user_id, bool has_participant,
                                          UserId participant_user_id,
+                                         MeetingState meeting_state_after,
+                                         const RequestId& request_id,
                                          const std::string& dedupe_context) const {
     MeetingEvent event;
     event.event_id = event_id;
@@ -140,6 +142,16 @@ MeetingEvent MeetingAggregate::MakeEvent(EventType type, const EventId& event_id
     event.participant_user_id = has_participant ? participant_user_id : 0;
     event.owner_chat_server_id = owner_chat_server_id_;
     event.occurred_at = occurred_at;
+    // 事件产生后的稳定状态，由调用点显式给出。
+    event.meeting_state_after = meeting_state_after;
+    // M2.1 中聚合产生的**全部**事件都由外部命令触发（Create / Join / Leave），
+    // 因此这里恒为 true，绝不存在"该事件没有发起命令"的情况。
+    //
+    // M3 引入内部触发事件（SessionDisconnected 的 ParticipantLeft fan-out）时，
+    // **必须**把本形参扩展为 (bool has_request_id, const RequestId&)，而不是为
+    // 内部事件伪造一个客户端 request_id —— 那会让 correlation 语义失真。
+    event.has_request_id = true;
+    event.request_id = request_id;
     event.dedupe_context = dedupe_context;
     return event;
 }
@@ -148,6 +160,8 @@ MeetingEvent MeetingAggregate::MakeEvent(EventType type, const EventId& event_id
 // 构造：初始聚合
 // ------------------------------------------------------------------------------
 
+// 私有状态初始化构造。所有正常创建路径都必须经过 Create() factory，
+// 从而必然同时得到一个 MeetingCreated value。
 MeetingAggregate::MeetingAggregate(const CreateMeetingParams& params) {
     meeting_id_ = params.meeting_id;
     host_user_id_ = params.host_user_id;
@@ -173,6 +187,22 @@ MeetingAggregate::MeetingAggregate(const CreateMeetingParams& params) {
     active_participant_count_ = 1;
     has_activated_non_host_ = false;
     has_close_context_ = false;
+}
+
+MeetingAggregate MeetingAggregate::Create(const CreateMeetingParams& params,
+                                          MeetingEvent& created_event) {
+    MeetingAggregate aggregate(params);
+
+    // MeetingCreated 的最低语义（Step 1.4 §22.2）：actor 为 Host、meeting_state_after
+    // 为 CREATED、不填 participant_user_id。
+    // "恰好一次"由 factory 的结构保证：一次合法的 Create domain operation 返回
+    // 一个聚合 + 一个事件值，调用方无法忘记生成，也无法重复生成。
+    created_event = aggregate.MakeEvent(
+        EventType::MEETING_CREATED, params.event_id, params.created_at,
+        /*has_actor=*/true, params.host_user_id,
+        /*has_participant=*/false, 0, MeetingState::CREATED, params.request_id,
+        std::string("MEETING_CREATED:") + params.meeting_id);
+    return aggregate;
 }
 
 // ------------------------------------------------------------------------------
@@ -204,12 +234,15 @@ bool MeetingAggregate::TryGetParticipantView(UserId user_id,
     return true;
 }
 
-std::vector<ParticipantView> MeetingAggregate::ListParticipantViews() const {
+std::vector<ParticipantView> MeetingAggregate::ListCurrentParticipantViews() const {
     std::vector<ParticipantView> views;
     views.reserve(participant_order_.size());
     for (std::size_t i = 0; i < participant_order_.size(); ++i) {
         const ParticipantRecord* participant = FindParticipant(participant_order_[i]);
-        if (participant != nullptr) {
+        // CURRENT 投影只列活动逻辑成员（Step 1.4 §18.4）。
+        // LEFT 的历史成员仍保留在 participants_ 中，但不进入该列表。
+        if (participant != nullptr &&
+            participant->participant_state == ParticipantState::ACTIVE) {
             views.push_back(MakeParticipantView(*participant));
         }
     }
@@ -247,6 +280,7 @@ std::size_t MeetingAggregate::BoundSessionCount(UserId user_id) const {
 // ------------------------------------------------------------------------------
 
 JoinResult MeetingAggregate::Join(UserId user_id, const SessionId& session_id,
+                                  const RequestId& request_id,
                                   const MutationParams& params) {
     JoinResult result;
     result.meeting = BuildMeetingView();
@@ -351,10 +385,18 @@ JoinResult MeetingAggregate::Join(UserId user_id, const SessionId& session_id,
     // NEW_PARTICIPANT 与 REJOINED_PARTICIPANT 各自恰好产生一次
     // ParticipantJoined，且使用调用方提供的新 event_id。
     result.has_event = true;
+    // ParticipantJoined 的 meeting_state_after 在 Phase 1 中**固定为 ACTIVE**
+    // （Step 1.4 §23.2）：该事件只能由 NEW_PARTICIPANT / REJOINED_PARTICIPANT 产生，
+    // 而首个非 Host 激活与 CREATED → ACTIVE 在同一个 mutation 内完成，后续 Join
+    // 与 Re-Join 也必然发生在已 ACTIVE 的 Meeting 上。
+    //
+    // 这里刻意使用**当前真实状态**而不是硬编码常量：两者在契约上恒等，用真实状态
+    // 可以让"若将来状态机被改坏"直接反映到事件里，而不是被常量掩盖。
+    //
     // dedupe_context 按 Phase 1 定义携带"逻辑动作 + meeting_id + user_id"这一最小
     // 去重上下文；它不是幂等键，也不规定去重算法。
     result.event = MakeEvent(EventType::PARTICIPANT_JOINED, params.event_id, params.now,
-                             true, user_id, true, user_id,
+                             true, user_id, true, user_id, meeting_state_, request_id,
                              std::string("PARTICIPANT_JOINED:") + meeting_id_ + ":" +
                                  ToDedupeUserId(user_id));
     return result;
@@ -368,6 +410,7 @@ JoinResult MeetingAggregate::Join(UserId user_id, const SessionId& session_id,
 // ------------------------------------------------------------------------------
 
 LeaveResult MeetingAggregate::Leave(UserId caller_user_id,
+                                    const RequestId& request_id,
                                     const MutationParams& params) {
     LeaveResult result;
     result.meeting = BuildMeetingView();
@@ -423,8 +466,12 @@ LeaveResult MeetingAggregate::Leave(UserId caller_user_id,
     result.outcome = LeaveOutcome::LEFT;
     result.meeting = BuildMeetingView();
     result.has_event = true;
+    // ParticipantLeft 的 meeting_state_after 是**mutation 完成后的当前 Meeting 状态**
+    // （Step 1.4 §21.3）：成员离会不得使 Meeting 状态回退，因此这里用真实状态而
+    // 不是硬编码 CREATED/ACTIVE。
     result.event = MakeEvent(EventType::PARTICIPANT_LEFT, params.event_id, params.now,
-                             true, caller_user_id, true, caller_user_id,
+                             true, caller_user_id, true, caller_user_id, meeting_state_,
+                             request_id,
                              std::string("PARTICIPANT_LEFT:") + meeting_id_ + ":" +
                                  ToDedupeUserId(caller_user_id));
     return result;

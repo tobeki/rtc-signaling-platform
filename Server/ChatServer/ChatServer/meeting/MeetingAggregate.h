@@ -138,9 +138,19 @@ struct BeginCloseResult {
 // ------------------------------------------------------------------------------
 class MeetingAggregate {
 public:
-    // 构造初始聚合：CREATED + Host(ACTIVE) + Host 初始 Binding(BOUND) + count=1，
-    // 并产生恰好一次 MeetingCreated（**不**产生 ParticipantJoined）。
-    MeetingAggregate(const CreateMeetingParams& params);
+    // 唯一的公开创建路径：构造初始聚合，并**同时**输出恰好一个 MeetingCreated。
+    //
+    //   MeetingEvent created_event;
+    //   MeetingAggregate aggregate = MeetingAggregate::Create(params, created_event);
+    //
+    // 之所以用 factory 而不是公开构造函数：M2 没有 EventBus，创建路径的
+    // "exactly once" 只能靠"返回一个聚合 + 一个事件值"这种**结构性**形状来表达。
+    // 这样 M3（MeetingService）不可能忘记生成 MeetingCreated，也不可能重复生成。
+    //
+    // 构造结果：CREATED + Host(ACTIVE) + Host 初始 Binding(BOUND) + count=1；
+    // **不产生** ParticipantJoined（Host 的建立不构成"加入"，Step 1.4 §13.3.1）。
+    static MeetingAggregate Create(const CreateMeetingParams& params,
+                                   MeetingEvent& created_event);
 
     // 只读投影。
     MeetingId Id() const { return meeting_id_; }
@@ -156,8 +166,13 @@ public:
     // false（此时 out 不被视为有效）。
     bool TryGetParticipantView(UserId user_id, ParticipantView& out) const;
 
-    // 按首次加入顺序返回全部已知 Participant 的视图（含已 LEFT 的历史成员）。
-    std::vector<ParticipantView> ListParticipantViews() const;
+    // CURRENT 投影（Step 1.4 §18.4）：开放 Meeting（CREATED/ACTIVE/ENDING）的
+    // ListParticipants 只列**活动**逻辑成员，因此这里只返回 ACTIVE 的 Participant。
+    //
+    // 注意 CURRENT 投影 ≠ 历史存储：已 LEFT 的成员仍保留在聚合内部，可通过
+    // TryGetParticipantView() 定位，并出现在 CloseContext / ClosedMeetingSnapshot
+    // 中。刻意**不**提供"包含历史成员"的列表 API，避免 M3 误用。
+    std::vector<ParticipantView> ListCurrentParticipantViews() const;
 
     // domain query（供 M3 判断 Binding，而不是测试后门）。
     bool IsSessionBound(UserId user_id, const SessionId& session_id) const;
@@ -168,11 +183,18 @@ public:
     // ---------------------------------------------------------------------------
 
     // Join / Re-Join / 附加 Session / 重复 Join。四种 outcome 见 M2 文档 §6。
+    //
+    // request_id 仅用于给产生的事件做 correlation（Step 1.4 §21.2），**不是**
+    // 幂等键：重复 Join 的幂等判断来自领域状态，与 request_id 无关。
+    // 不产生事件的路径（ADDITIONAL_SESSION_BOUND / ALREADY_BOUND / 被拒绝）不
+    // 会因为传入了 request_id 而多出任何副作用。
     JoinResult Join(UserId user_id, const SessionId& session_id,
-                    const MutationParams& params);
+                    const RequestId& request_id, const MutationParams& params);
 
     // 逻辑离会（User 级：解除该 User 在本 Meeting 下全部 Binding）。
-    LeaveResult Leave(UserId caller_user_id, const MutationParams& params);
+    // request_id 同上，仅用于 ParticipantLeft 的 correlation。
+    LeaveResult Leave(UserId caller_user_id, const RequestId& request_id,
+                      const MutationParams& params);
 
     // Host 发起关闭：CREATED/ACTIVE → ENDING，并冻结 CloseContext。
     BeginCloseResult BeginClose(UserId caller_user_id, const RequestId& request_id,
@@ -190,6 +212,10 @@ public:
     const CloseContext& FrozenCloseContext() const { return close_context_; }
 
 private:
+    // 真正的状态初始化构造：**私有**。所有正常创建路径都必须经过 Create()
+    // factory，从而必然同时得到一个 MeetingCreated value。
+    explicit MeetingAggregate(const CreateMeetingParams& params);
+
     struct BindingRecord {
         SessionId session_id;
         BindingState binding_state = BindingState::BOUND;
@@ -227,12 +253,20 @@ private:
     static ParticipantIdentitySnapshot MakeIdentitySnapshot(
         const ParticipantRecord& participant);
 
+    // 一次构造**完整**的 event value：包含 event contract 的必需字段
+    // meeting_state_after，以及可选的 request_id correlation。
+    //
+    // meeting_state_after 必须由调用点传入**事件产生后**的稳定状态，而不是让
+    // 外部在构造完成后再补一次 patch —— 那正是 M2 初次实现漏掉该字段的原因。
+    //
     // dedupe_context 由各调用点按"逻辑动作 + meeting_id + user_id"构造，
     // 与 Phase 1 对最小去重上下文的定义一致；它不是幂等键。
     MeetingEvent MakeEvent(EventType type, const EventId& event_id,
                            const Timestamp& occurred_at, bool has_actor,
                            UserId actor_user_id, bool has_participant,
                            UserId participant_user_id,
+                           MeetingState meeting_state_after,
+                           const RequestId& request_id,
                            const std::string& dedupe_context) const;
 
     MeetingId meeting_id_;
