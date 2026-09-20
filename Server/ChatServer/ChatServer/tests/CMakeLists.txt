@@ -25,6 +25,7 @@ find_package(GTest REQUIRED)
 
 add_executable(ChatServerUnitTests
     TestInfrastructureSmoke.cpp
+    MeetingTypesContractTest.cpp
 )
 
 target_compile_features(ChatServerUnitTests PRIVATE cxx_std_14)
