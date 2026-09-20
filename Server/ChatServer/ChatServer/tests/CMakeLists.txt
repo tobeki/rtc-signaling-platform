@@ -26,6 +26,7 @@ find_package(GTest REQUIRED)
 add_executable(ChatServerUnitTests
     TestInfrastructureSmoke.cpp
     MeetingTypesContractTest.cpp
+    MeetingAggregateTest.cpp
 )
 
 target_compile_features(ChatServerUnitTests PRIVATE cxx_std_14)
@@ -42,6 +43,10 @@ target_include_directories(ChatServerUnitTests PRIVATE
 # the GoogleTest package, not through the ChatServer runtime graph.
 target_link_libraries(ChatServerUnitTests PRIVATE
     GTest::gtest_main
+    # M2: the pure Meeting domain library. It brings its own include root with
+    # it (PUBLIC on the MeetingDomain target) and links nothing else, so the
+    # test executable stays free of Redis/MySQL/gRPC/protobuf dependencies.
+    MeetingDomain
 )
 
 # Register each TEST()/TEST_F() case with CTest automatically. This keeps CTest

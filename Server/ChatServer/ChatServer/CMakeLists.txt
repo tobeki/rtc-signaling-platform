@@ -222,6 +222,32 @@ target_link_libraries(ChatServer PRIVATE
 )
 
 # ------------------------------------------------------------------------------
+# MeetingDomain (Phase 2, M2).
+#
+# Pure domain static library: the single-aggregate Meeting state machine.
+#
+# Dependency boundary (deliberate, and not merely a convention):
+#   MeetingDomain -> MeetingTypes -> C++ standard library only
+#
+# It links NOTHING: no gRPC, protobuf, hiredis, MySQL, JsonCpp, Boost, and not
+# even Threads. If pure domain code ever needs one of those, the design has
+# drifted rather than the build being under-specified.
+#
+# The ChatServer executable deliberately does NOT link this target yet: no
+# network adapter consumes MeetingAggregate until M4. The library is built and
+# exercised by the unit tests only.
+# ------------------------------------------------------------------------------
+add_library(MeetingDomain STATIC
+    meeting/MeetingAggregate.cpp
+)
+
+target_compile_features(MeetingDomain PUBLIC cxx_std_14)
+
+target_include_directories(MeetingDomain PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+# ------------------------------------------------------------------------------
 # Unit tests (Phase 2, Step 2.5).
 #
 # include(CTest) defines the standard BUILD_TESTING option (default ON) and
