@@ -222,23 +222,28 @@ target_link_libraries(ChatServer PRIVATE
 )
 
 # ------------------------------------------------------------------------------
-# MeetingDomain (Phase 2, M2).
+# MeetingDomain (Phase 2, M2 + M3).
 #
-# Pure domain static library: the single-aggregate Meeting state machine.
+# Pure domain static library: one Meeting state machine per aggregate, plus the
+# in-memory registries and application service that manage many meetings.
 #
 # Dependency boundary (deliberate, and not merely a convention):
-#   MeetingDomain -> MeetingTypes -> C++ standard library only
+#   MeetingService -> MeetingAggregate -> MeetingTypes -> C++ standard library only
 #
 # It links NOTHING: no gRPC, protobuf, hiredis, MySQL, JsonCpp, Boost, and not
 # even Threads. If pure domain code ever needs one of those, the design has
 # drifted rather than the build being under-specified.
 #
+# MeetingService adds no thread, lock, timer or async task: it assumes the
+# caller supplies the single-writer serialization boundary (M4).
+#
 # The ChatServer executable deliberately does NOT link this target yet: no
-# network adapter consumes MeetingAggregate until M4. The library is built and
+# network adapter consumes the Meeting Core until M4. The library is built and
 # exercised by the unit tests only.
 # ------------------------------------------------------------------------------
 add_library(MeetingDomain STATIC
     meeting/MeetingAggregate.cpp
+    meeting/MeetingService.cpp
 )
 
 target_compile_features(MeetingDomain PUBLIC cxx_std_14)

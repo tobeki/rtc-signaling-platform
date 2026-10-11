@@ -8,8 +8,13 @@
 //
 // 明确不负责（属于 M3/M4 及以后）：
 //   MeetingService、MeetingRegistry、ClosedSnapshotRegistry、
-//   session→meetings 反向索引、SessionDisconnected fan-out、
+//   session→meetings 反向索引、SessionDisconnected fan-out 的**编排**、
 //   FinalizeClose work item 调度、LogicSystem 队列、任何网络/存储/协议。
+//
+// M3 增量（仍然留在聚合内部，因为它是"一个 Meeting 内部"的状态机细节）：
+//   DisconnectSession() —— 针对一个明确的 (user_id, session_id) 解除**单个**
+//   Binding。这是内部断线清理，不是外部 Leave API；fan-out 到哪些 Meeting 由
+//   M3 的 MeetingService 负责。
 //
 // 依赖边界：仅 C++ 标准库 + M1 的 MeetingTypes.h。不链接 gRPC、protobuf、
 // hiredis、MySQL、JsonCpp、Boost，也不依赖 Threads。
@@ -134,6 +139,28 @@ struct BeginCloseResult {
 };
 
 // ------------------------------------------------------------------------------
+// M3：单 Binding 断线清理的结果。
+//
+// 这是**内部** domain mutation 的结果，不引入新的 ResultCode，也不是客户端
+// Response 契约：它只表达"这一个 Binding 是否真的被解除、该 Participant 是否
+// 因此真的变成了 LEFT、以及随之产生（或未产生）的 ParticipantLeft"。
+// ------------------------------------------------------------------------------
+struct DisconnectSessionResult {
+    // 该 (user_id, session_id) 本次是否真的由 BOUND 变为 UNBOUND。
+    // 重复 disconnect、或该 session 本就不属于该 user 时为 false（幂等）。
+    bool binding_changed = false;
+
+    // 是否真实发生了 ACTIVE → LEFT（普通 Participant 的最后一条 Binding 被解除）。
+    // ENDING/CLOSED、Host、仍有其它有效 Binding 时为 false。
+    bool participant_became_left = false;
+
+    MeetingView meeting;
+
+    bool has_event = false;
+    MeetingEvent event;
+};
+
+// ------------------------------------------------------------------------------
 // MeetingAggregate
 // ------------------------------------------------------------------------------
 class MeetingAggregate {
@@ -200,6 +227,25 @@ public:
     BeginCloseResult BeginClose(UserId caller_user_id, const RequestId& request_id,
                                 const MutationParams& params);
 
+    // ---------------------------------------------------------------------------
+    // M3：SessionDisconnected fan-out 用到的**单 Binding** 内部清理。
+    //
+    // 语义边界（Step 1.3 §13.2/§14、Step 1.5 §12）：
+    //   - 只解除 (user_id, session_id) 这一条 Binding，不是 User 级 Leave；
+    //   - 普通 Participant 仅在**剩余有效 Binding 变为 0** 时才 ACTIVE → LEFT，
+    //     并产生一次 ParticipantLeft；
+    //   - Host 即使剩余 Binding 为 0 也保持 ACTIVE（I4），不产生事件、不关闭 Meeting；
+    //   - Meeting 处于 ENDING/CLOSED 时成员关系已冻结给 close flow，只做必要的
+    //     幂等 UNBOUND，不改变 membership（Step 1.3 §13.4 规则 5）；
+    //   - 重复 disconnect 完全幂等。
+    //
+    // 该 ParticipantLeft 由**系统内部清理**触发，因此其 has_request_id 与
+    // has_actor_user_id 均为 false：不得为它伪造客户端 request_id 或操作者
+    // （Step 1.4 §21.2）。
+    DisconnectSessionResult DisconnectSession(UserId user_id,
+                                              const SessionId& session_id,
+                                              const MutationParams& params);
+
     // 基于冻结尾边界生成 ClosedMeetingSnapshot 所需材料。
     //
     // closed_at 由调用方提供（M2 不让聚合自己取时间）。本方法不发布 snapshot、
@@ -259,6 +305,11 @@ private:
     // meeting_state_after 必须由调用点传入**事件产生后**的稳定状态，而不是让
     // 外部在构造完成后再补一次 patch —— 那正是 M2 初次实现漏掉该字段的原因。
     //
+    // request_id 用 (has_request_id, value) 表达（M3 扩展）：由外部命令直接触发
+    // 的事件为 true；SessionDisconnected 导致的内部 ParticipantLeft 为 false。
+    // 这避免了"为内部事件伪造一个客户端 request_id"这种会让 correlation 语义
+    // 失真的做法。
+    //
     // dedupe_context 由各调用点按"逻辑动作 + meeting_id + user_id"构造，
     // 与 Phase 1 对最小去重上下文的定义一致；它不是幂等键。
     MeetingEvent MakeEvent(EventType type, const EventId& event_id,
@@ -266,7 +317,7 @@ private:
                            UserId actor_user_id, bool has_participant,
                            UserId participant_user_id,
                            MeetingState meeting_state_after,
-                           const RequestId& request_id,
+                           bool has_request_id, const RequestId& request_id,
                            const std::string& dedupe_context) const;
 
     MeetingId meeting_id_;

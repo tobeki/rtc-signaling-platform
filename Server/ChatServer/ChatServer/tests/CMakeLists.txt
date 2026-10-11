@@ -27,6 +27,7 @@ add_executable(ChatServerUnitTests
     TestInfrastructureSmoke.cpp
     MeetingTypesContractTest.cpp
     MeetingAggregateTest.cpp
+    MeetingServiceTest.cpp
 )
 
 target_compile_features(ChatServerUnitTests PRIVATE cxx_std_14)

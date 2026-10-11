@@ -130,7 +130,7 @@ MeetingEvent MeetingAggregate::MakeEvent(EventType type, const EventId& event_id
                                          UserId actor_user_id, bool has_participant,
                                          UserId participant_user_id,
                                          MeetingState meeting_state_after,
-                                         const RequestId& request_id,
+                                         bool has_request_id, const RequestId& request_id,
                                          const std::string& dedupe_context) const {
     MeetingEvent event;
     event.event_id = event_id;
@@ -144,14 +144,11 @@ MeetingEvent MeetingAggregate::MakeEvent(EventType type, const EventId& event_id
     event.occurred_at = occurred_at;
     // 事件产生后的稳定状态，由调用点显式给出。
     event.meeting_state_after = meeting_state_after;
-    // M2.1 中聚合产生的**全部**事件都由外部命令触发（Create / Join / Leave），
-    // 因此这里恒为 true，绝不存在"该事件没有发起命令"的情况。
-    //
-    // M3 引入内部触发事件（SessionDisconnected 的 ParticipantLeft fan-out）时，
-    // **必须**把本形参扩展为 (bool has_request_id, const RequestId&)，而不是为
-    // 内部事件伪造一个客户端 request_id —— 那会让 correlation 语义失真。
-    event.has_request_id = true;
-    event.request_id = request_id;
+    // 外部命令（Create / Join / Leave）直接触发的事件携带对应 request_id；
+    // SessionDisconnected 导致的内部 ParticipantLeft 不携带（也绝不复用某个
+    // 客户端 request_id）。
+    event.has_request_id = has_request_id;
+    event.request_id = has_request_id ? request_id : RequestId();
     event.dedupe_context = dedupe_context;
     return event;
 }
@@ -200,7 +197,8 @@ MeetingAggregate MeetingAggregate::Create(const CreateMeetingParams& params,
     created_event = aggregate.MakeEvent(
         EventType::MEETING_CREATED, params.event_id, params.created_at,
         /*has_actor=*/true, params.host_user_id,
-        /*has_participant=*/false, 0, MeetingState::CREATED, params.request_id,
+        /*has_participant=*/false, 0, MeetingState::CREATED,
+        /*has_request_id=*/true, params.request_id,
         std::string("MEETING_CREATED:") + params.meeting_id);
     return aggregate;
 }
@@ -396,7 +394,8 @@ JoinResult MeetingAggregate::Join(UserId user_id, const SessionId& session_id,
     // dedupe_context 按 Phase 1 定义携带"逻辑动作 + meeting_id + user_id"这一最小
     // 去重上下文；它不是幂等键，也不规定去重算法。
     result.event = MakeEvent(EventType::PARTICIPANT_JOINED, params.event_id, params.now,
-                             true, user_id, true, user_id, meeting_state_, request_id,
+                             true, user_id, true, user_id, meeting_state_,
+                             /*has_request_id=*/true, request_id,
                              std::string("PARTICIPANT_JOINED:") + meeting_id_ + ":" +
                                  ToDedupeUserId(user_id));
     return result;
@@ -471,7 +470,7 @@ LeaveResult MeetingAggregate::Leave(UserId caller_user_id,
     // 不是硬编码 CREATED/ACTIVE。
     result.event = MakeEvent(EventType::PARTICIPANT_LEFT, params.event_id, params.now,
                              true, caller_user_id, true, caller_user_id, meeting_state_,
-                             request_id,
+                             /*has_request_id=*/true, request_id,
                              std::string("PARTICIPANT_LEFT:") + meeting_id_ + ":" +
                                  ToDedupeUserId(caller_user_id));
     return result;
@@ -554,6 +553,89 @@ BeginCloseResult MeetingAggregate::BeginClose(UserId caller_user_id,
     result.should_schedule_finalize = true;
     result.has_close_context = true;
     result.close_context = close_context_;
+    return result;
+}
+
+// ------------------------------------------------------------------------------
+// M3：SessionDisconnected 的单 Binding 清理
+//
+// 与 Leave 的关键区别：Leave 是 **User 级**外部命令（解除该 User 的全部 Binding），
+// 本方法只解除一个 session 的一条 Binding，且由系统内部触发。
+//
+// 裁决顺序（Step 1.3 §13.2 流程图 / §13.4 规则 5）：
+//   1. 找到该 User 与该 session 的 BOUND Binding（否则幂等返回）；
+//   2. 解除它；
+//   3. ENDING/CLOSED → 到此为止（membership 已冻结，不改计数、不产生事件）；
+//   4. Host → 到此为止（I4：Host 允许 0 个有效 Session）；
+//   5. 普通 Participant 仍有其它有效 Binding → 保持 ACTIVE；
+//   6. 普通 Participant 且剩余为 0 且当前 ACTIVE → ACTIVE → LEFT + 一次 ParticipantLeft。
+// ------------------------------------------------------------------------------
+
+DisconnectSessionResult MeetingAggregate::DisconnectSession(
+    UserId user_id, const SessionId& session_id, const MutationParams& params) {
+    DisconnectSessionResult result;
+    result.meeting = BuildMeetingView();
+
+    ParticipantRecord* participant = FindParticipant(user_id);
+    if (participant == nullptr) {
+        // 该 User 从未是本 Meeting 成员：没有任何可清理的关系。
+        return result;
+    }
+
+    BindingRecord* binding = FindBoundBinding(*participant, session_id);
+    if (binding == nullptr) {
+        // 重复 disconnect（或 stale disconnect 命中已 UNBOUND 的记录）：完全幂等。
+        return result;
+    }
+
+    binding->binding_state = BindingState::UNBOUND;
+    result.binding_changed = true;
+
+    // ENDING/CLOSED：成员关系已冻结给 close flow，只做必要的幂等 UNBOUND。
+    // 不改变 membership、不改变计数、不产生 ParticipantLeft（Step 1.3 §13.4 规则 5）。
+    if (meeting_state_ == MeetingState::ENDING ||
+        meeting_state_ == MeetingState::CLOSED) {
+        result.meeting = BuildMeetingView();
+        return result;
+    }
+
+    // Host：即使有效 Binding 变为 0 也保持 ACTIVE（I4）。
+    // Host 断线绝不自动关闭 Meeting，也不产生 ParticipantLeft。
+    if (participant->role == ParticipantRole::HOST) {
+        result.meeting = BuildMeetingView();
+        return result;
+    }
+
+    // 普通 Participant 仍有其它有效 Binding：保持 ACTIVE，无事件。
+    if (BoundSessionCount(user_id) > 0) {
+        result.meeting = BuildMeetingView();
+        return result;
+    }
+
+    // 已是 LEFT 的历史成员被再次清理：membership 未变化，不产生事件。
+    if (participant->participant_state != ParticipantState::ACTIVE) {
+        result.meeting = BuildMeetingView();
+        return result;
+    }
+
+    // 真实发生 ACTIVE → LEFT。
+    participant->participant_state = ParticipantState::LEFT;
+    participant->has_left_at = true;
+    participant->left_at = params.now;
+    --active_participant_count_;
+    result.participant_became_left = true;
+
+    // 系统内部清理触发：不携带 request_id，也不伪造 actor（Step 1.4 §21.2）。
+    // participant_user_id 必须存在。meeting_state_after 为当前真实状态
+    // （离会不得使 Meeting 状态回退）。
+    result.has_event = true;
+    result.event = MakeEvent(EventType::PARTICIPANT_LEFT, params.event_id, params.now,
+                             /*has_actor=*/false, 0, /*has_participant=*/true, user_id,
+                             meeting_state_,
+                             /*has_request_id=*/false, RequestId(),
+                             std::string("PARTICIPANT_LEFT:") + meeting_id_ + ":" +
+                                 ToDedupeUserId(user_id));
+    result.meeting = BuildMeetingView();
     return result;
 }
 
