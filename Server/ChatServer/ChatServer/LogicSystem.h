@@ -1,11 +1,12 @@
 #pragma once
 #include "Singleton.h"
-#include <queue>
-#include <thread>
-#include "CSession.h"
+#include "LogicWorkDispatcher.h"
 #include <memory>
 #include <map>
-#include <functional>
+#include <mutex>
+#include <thread>
+#include <string>
+#include "CSession.h"
 #include "const.h"
 #include <json/json.h>
 #include <json/value.h>
@@ -17,16 +18,37 @@
 class CServer;
 typedef  std::function<void(std::shared_ptr<CSession> session, const short& msg_id, const std::string& msg_data)> FunCallBack;
 
-class LogicSystem :public Singleton<LogicSystem>
+class LogicSystem :public Singleton<LogicSystem>, public ILegacyMessageRouter
 {
 	friend class Singleton<LogicSystem>;
 public:
 	~LogicSystem();
+
+	// 遗留外部条目：签名未更改，调用者未更改（CSession）。
+    // 消息被封装为 EXTERNAL_MESSAGE 工作项并发布到单一权威的 FIFO。
 	void PostMsgToQue(std::shared_ptr < LogicNode> msg);
+
+	// 	ILegacyMessageRouter：生产环境的传统分发路径。  
+	// 逐字保持原始的 msg_id -> FunCallBack 查找语义  
+	// （缺失的 id 会被忽略，回调接收相同的三个参数），但现在由队列消费者在队列互斥之外调用。
+	void RouteExternalMessage(const std::shared_ptr<LogicNode>& msg);
+
+	// 已键入的内部入队条目（单个 FIFO，与传统消息和会议命令具有相同的排序域）。
+	bool PostSessionDisconnectedWork(const meeting::SessionId& session_id);
+	bool PostMeetingCommandWork(const meeting::MeetingRequestContext& context,
+		ClientMeetingCommandKind command, const meeting::MeetingId& meeting_id);
+
+	// 针对单写入者/单消费者不变量的只读可观察性。
+	const std::string& LocalServerId() const { return _local_server_id; }
+
+	// 只读面向会议的诊断。仅有意基于值：没有访问器可以提供可变的 MeetingService、
+	// 注册表或队列，否则单写边界可能会被网络线程绕过。会议的修改只能通过发布工作项来实现。
+	bool HasActiveMeeting(const meeting::MeetingId& meeting_id) const;
+	bool HasClosedSnapshot(const meeting::MeetingId& meeting_id) const;
 private:
 	LogicSystem();
-	void DealMsg();
 	void RegisterCallBacks();
+	void EnsureWorkQueueStarted();
 	void LoginHandler(std::shared_ptr<CSession> session, const short& msg_id, const std::string& msg_data);
 	void SearchInfo(std::shared_ptr<CSession> session, const short& msg_id, const std::string& msg_data);
 	void AddFriendApply(std::shared_ptr<CSession> session, const short& msg_id, const std::string& msg_data);
@@ -40,11 +62,23 @@ private:
 	bool GetFriendApplyInfo(int to_uid, std::vector<std::shared_ptr<ApplyInfo>>& list);
 	bool GetFriendList(int self_id, std::vector<std::shared_ptr<UserInfo>>& user_list);
 
-	std::thread _worker_thread;
-	std::queue<std::shared_ptr<LogicNode>> _msg_que;
-	std::mutex _mutex;
-	std::condition_variable _consume;
-	bool _b_stop;
+	// 唯一的权威 FIFO 以及它的单个消费者。
+	// M4 用这个执行器取代了旧的三元组（_msg_que / _mutex / _consume / _worker_thread）。
+	// 仍然只有一个队列和一个工作线程：没有第二个业务队列，没有第二个业务工作线程，
+	// 没有异步任务执行器。
+	std::unique_ptr<SerializedWorkExecutor<LogicWorkDispatcher>> _work_executor;
+
+	// 会议执行上下文。由 LogicSystem 执行上下文拥有，仅由单个消费者线程修改，
+	// 这也正是使 MeetingService 的“非线程安全，无内部锁”契约安全的原因。
+	std::unique_ptr<LogicWorkDispatcher> _dispatcher;
+
+	// 在构建 MeetingRequestContext 时使用的本地服务器 ID。
+	std::string _local_server_id;
+
+	 // 保护一次性构建 _dispatcher _work_executor。
+    // 延迟（不在构造函数中构建），以确保构造顺序永远不依赖于单例构造顺序。
+	std::once_flag _work_start_once;
+
 	std::map<short, FunCallBack> _fun_callbacks;
 };
 

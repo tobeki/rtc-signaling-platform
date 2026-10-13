@@ -28,6 +28,13 @@ add_executable(ChatServerUnitTests
     MeetingTypesContractTest.cpp
     MeetingAggregateTest.cpp
     MeetingServiceTest.cpp
+    LogicWorkQueueTest.cpp
+    # M4: the unified work queue/dispatcher implementation. It is added to the
+    # test target as SOURCE (not linked through the ChatServer executable) so the
+    # tests exercise the production implementation itself while staying free of
+    # Redis / MySQL / gRPC / protobuf. LogicSystem.cpp is deliberately NOT part of
+    # this target: it pulls in the whole legacy IM business graph.
+    ../LogicWorkDispatcher.cpp
 )
 
 target_compile_features(ChatServerUnitTests PRIVATE cxx_std_14)

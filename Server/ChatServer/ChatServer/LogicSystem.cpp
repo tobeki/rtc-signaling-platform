@@ -5,9 +5,10 @@
 #include "UserMgr.h"
 #include "ChatGrpcClient.h"
 
-LogicSystem::LogicSystem() : _b_stop(false) {
+LogicSystem::LogicSystem() {
 	RegisterCallBacks();
-	_worker_thread = std::thread(&LogicSystem::DealMsg, this);
+	// å”¯ä¸€ FIFO åŠå…¶æ¶ˆè´¹è€…æ”¹ä¸ºæƒ°æ€§å¯åŠ¨ï¼ˆEnsureWorkQueueStartedï¼‰ï¼š
+	// LogicSystem æ˜¯ Singletonï¼Œæ„é€ é¡ºåºä¸åº”ä¾èµ–å…¶å®ƒ Singleton æ˜¯å¦å·²å°±ç»ªã€‚
 }
 
 void LogicSystem::RegisterCallBacks() {
@@ -42,7 +43,7 @@ void LogicSystem::LoginHandler(std::shared_ptr<CSession> session, const short& m
 		session->Send(return_str, MSG_CHAT_LOGIN_RSP);
 		});
 
-	//´Óredis»ñÈ¡ÓÃ»§tokenÊÇ·ñÕıÈ·
+	//ä»redisè·å–ç”¨æˆ·tokenæ˜¯å¦æ­£ç¡®
 	std::string uid_str = std::to_string(uid);
 	std::string token_key = USERTOKENPREFIX + uid_str;
 	std::string token_value = "";
@@ -75,7 +76,7 @@ void LogicSystem::LoginHandler(std::shared_ptr<CSession> session, const short& m
 	rtvalue["sex"] = user_info->sex;
 	rtvalue["icon"] = user_info->icon;
 
-	//´ÓÊı¾İ¿â»ñÈ¡ÉêÇëÁĞ±í
+	//ä»æ•°æ®åº“è·å–ç”³è¯·åˆ—è¡¨
 	std::vector<std::shared_ptr<ApplyInfo>> apply_list;
 	auto b_apply = GetFriendApplyInfo(uid, apply_list);
 	if (b_apply) {
@@ -92,7 +93,7 @@ void LogicSystem::LoginHandler(std::shared_ptr<CSession> session, const short& m
 		}
 	}
 
-	//»ñÈ¡ºÃÓÑÁĞ±í
+	//è·å–å¥½å‹åˆ—è¡¨
 	std::vector<std::shared_ptr<UserInfo>> friend_list;
 	bool b_friend_list = GetFriendList(uid, friend_list);
 	for (auto& friend_ele : friend_list) {
@@ -107,7 +108,7 @@ void LogicSystem::LoginHandler(std::shared_ptr<CSession> session, const short& m
 		rtvalue["friend_list"].append(obj);
 	}
 
-	// ½«µÇÂ¼ÊıÁ¿Ôö¼Ó
+	// å°†ç™»å½•æ•°é‡å¢åŠ 
 	auto server_name = ConfigMgr::Inst().GetValue("SelfServer", "Name");
 	auto rd_res = RedisMgr::GetInstance()->HGet(LOGIN_COUNT, server_name);
 	int count = 0;
@@ -120,14 +121,14 @@ void LogicSystem::LoginHandler(std::shared_ptr<CSession> session, const short& m
 	auto count_str = std::to_string(count);
 	RedisMgr::GetInstance()->HSet(LOGIN_COUNT, server_name, count_str);
 
-	//session°ó¶¨ÓÃ»§uid
+	//sessionç»‘å®šç”¨æˆ·uid
 	session->SetUserId(uid);
 
-	//ÎªÓÃ»§ÉèÖÃµÇÂ¼ip serverµÄÃû×Ö
+	//ä¸ºç”¨æˆ·è®¾ç½®ç™»å½•ip serverçš„åå­—
 	std::string ipkey = USERIPPREFIX + uid_str;
 	RedisMgr::GetInstance()->Set(ipkey, server_name);
 
-	//uidºÍsession°ó¶¨¹ÜÀí,·½±ãÒÔºóÌßÈË²Ù×÷
+	//uidå’Œsessionç»‘å®šç®¡ç†,æ–¹ä¾¿ä»¥åè¸¢äººæ“ä½œ
 	UserMgr::GetInstance()->SetUserSession(uid, session);
 
 	return;
@@ -148,7 +149,7 @@ void LogicSystem::SearchInfo(std::shared_ptr<CSession> session, const short& msg
 		session->Send(return_str, ID_SEARCH_USER_RSP);
 		});
 
-	// ÅĞ¶ÏÊÇ·ñÊÇ´¿Êı×Ö
+	// åˆ¤æ–­æ˜¯å¦æ˜¯çº¯æ•°å­—
 	bool b_digit = isPureDigit(uid_str);
 	if (b_digit) {
 		GetUserByUid(uid_str, rtvalue);
@@ -178,10 +179,10 @@ void LogicSystem::AddFriendApply(std::shared_ptr<CSession> session, const short&
 		session->Send(return_str, ID_ADD_FRIEND_RSP);
 		});
 
-	//ÏÈ¸üĞÂÊı¾İ¿â(±ÜÃâ¶Ô·½ÀëÏßÊÕ²»µ½)
+	//å…ˆæ›´æ–°æ•°æ®åº“(é¿å…å¯¹æ–¹ç¦»çº¿æ”¶ä¸åˆ°)
 	MysqlMgr::GetInstance()->AddFriendApply(fromuid, touid);
 
-	//²éÑ¯redis ²éÕÒtouid¶ÔÓ¦µÄserver ip
+	//æŸ¥è¯¢redis æŸ¥æ‰¾touidå¯¹åº”çš„server ip
 	auto to_str = std::to_string(touid);
 	auto to_ip_key = USERIPPREFIX + to_str;
 	std::string to_ip_value = "";
@@ -197,11 +198,11 @@ void LogicSystem::AddFriendApply(std::shared_ptr<CSession> session, const short&
 	auto apply_info = std::make_shared<UserInfo>();
 	bool b_info = GetBaseInfo(base_key, fromuid, apply_info);
 
-	//Èç¹û¶Ô·½ÔÚ±¾·şÎñÆ÷£¬Ö±½ÓÍ¨Öª¶Ô·½ÓĞÉêÇëÏûÏ¢
+	//å¦‚æœå¯¹æ–¹åœ¨æœ¬æœåŠ¡å™¨ï¼Œç›´æ¥é€šçŸ¥å¯¹æ–¹æœ‰ç”³è¯·æ¶ˆæ¯
 	if (to_ip_value == self_name) {
 		auto session = UserMgr::GetInstance()->GetSession(touid);
 		if (session) {
-			//ÔÚÄÚ´æÖĞÔòÖ±½Ó·¢ËÍÍ¨Öª¶Ô·½
+			//åœ¨å†…å­˜ä¸­åˆ™ç›´æ¥å‘é€é€šçŸ¥å¯¹æ–¹
 			Json::Value notify;
 			notify["error"] = ErrorCodes::Success;
 			notify["applyuid"] = fromuid;
@@ -230,7 +231,7 @@ void LogicSystem::AddFriendApply(std::shared_ptr<CSession> session, const short&
 		add_req.set_nick(apply_info->nick);
 	}
 
-	// ·¢ËÍÍ¨Öª
+	// å‘é€é€šçŸ¥
 	ChatGrpcClient::GetInstance()->NotifyAddFriend(to_ip_value, add_req);
 }
 
@@ -252,7 +253,7 @@ void LogicSystem::AuthFriendApply(std::shared_ptr<CSession> session, const short
 	std::string base_key = USER_BASE_INFO + std::to_string(touid);
 	bool b_info = GetBaseInfo(base_key, touid, user_info);
 	if (b_info) {
-		// ¼ÇÂ¼¶Ô¶ËµÄĞÅÏ¢£¬×¼±¸·¢»Ø×Ô¼º¿Í»§¶Ë
+		// è®°å½•å¯¹ç«¯çš„ä¿¡æ¯ï¼Œå‡†å¤‡å‘å›è‡ªå·±å®¢æˆ·ç«¯
 		rtvalue["name"] = user_info->name;
 		rtvalue["nick"] = user_info->nick;
 		rtvalue["icon"] = user_info->icon;
@@ -264,18 +265,18 @@ void LogicSystem::AuthFriendApply(std::shared_ptr<CSession> session, const short
 	}
 
 	Defer defer([this, &rtvalue, session]() {
-		// ½«¶Ô·½µÄĞÅÏ¢´«»Ø×Ô¼ºµÄ¿Í»§¶Ë
+		// å°†å¯¹æ–¹çš„ä¿¡æ¯ä¼ å›è‡ªå·±çš„å®¢æˆ·ç«¯
 		std::string return_str = rtvalue.toStyledString();
 		session->Send(return_str, ID_AUTH_FRIEND_RSP);
 		});
 
-	//ÏÈ¸üĞÂÊı¾İ¿â
+	//å…ˆæ›´æ–°æ•°æ®åº“
 	MysqlMgr::GetInstance()->AuthFriendApply(fromuid, touid);
 
-	//¸üĞÂÊı¾İ¿âÌí¼ÓºÃÓÑ
+	//æ›´æ–°æ•°æ®åº“æ·»åŠ å¥½å‹
 	MysqlMgr::GetInstance()->AddFriend(fromuid, touid, back_name);
 
-	//²éÑ¯redis ²éÕÒtouid¶ÔÓ¦µÄserver ip
+	//æŸ¥è¯¢redis æŸ¥æ‰¾touidå¯¹åº”çš„server ip
 	auto to_str = std::to_string(touid);
 	auto to_ip_key = USERIPPREFIX + to_str;
 	std::string to_ip_value = "";
@@ -286,11 +287,11 @@ void LogicSystem::AuthFriendApply(std::shared_ptr<CSession> session, const short
 
 	auto& cfg = ConfigMgr::Inst();
 	auto self_name = cfg["SelfServer"]["Name"];
-	//Ö±½ÓÍ¨Öª¶Ô·½ÓĞÈÏÖ¤Í¨¹ıÏûÏ¢
+	//ç›´æ¥é€šçŸ¥å¯¹æ–¹æœ‰è®¤è¯é€šè¿‡æ¶ˆæ¯
 	if (to_ip_value == self_name) {
 		auto session = UserMgr::GetInstance()->GetSession(touid);
 		if (session) {
-			//ÔÚÄÚ´æÖĞÔòÖ±½Ó·¢ËÍÍ¨Öª¶Ô·½
+			//åœ¨å†…å­˜ä¸­åˆ™ç›´æ¥å‘é€é€šçŸ¥å¯¹æ–¹
 			Json::Value notify;
 			notify["error"] = ErrorCodes::Success;
 			notify["fromuid"] = fromuid;
@@ -299,7 +300,7 @@ void LogicSystem::AuthFriendApply(std::shared_ptr<CSession> session, const short
 			auto user_info = std::make_shared<UserInfo>();
 			bool b_info = GetBaseInfo(base_key, fromuid, user_info);
 			if (b_info) {
-				// ²é×Ô¼ºµÄĞÅÏ¢£¬·µ»Ø¸ø¶Ô·½
+				// æŸ¥è‡ªå·±çš„ä¿¡æ¯ï¼Œè¿”å›ç»™å¯¹æ–¹
 				notify["name"] = user_info->name;
 				notify["nick"] = user_info->nick;
 				notify["icon"] = user_info->icon;
@@ -320,7 +321,7 @@ void LogicSystem::AuthFriendApply(std::shared_ptr<CSession> session, const short
 	auth_req.set_fromuid(fromuid);
 	auth_req.set_touid(touid);
 
-	//·¢ËÍÍ¨Öª
+	//å‘é€é€šçŸ¥
 	ChatGrpcClient::GetInstance()->NotifyAuthFriend(to_ip_value, auth_req);
 }
 
@@ -346,7 +347,7 @@ void LogicSystem::DealChatTextMsg(std::shared_ptr<CSession> session, const short
 		session->Send(return_str, ID_TEXT_CHAT_MSG_RSP);
 		});
 
-	//²éÑ¯redis ²éÕÒtouid¶ÔÓ¦µÄserver ip
+	//æŸ¥è¯¢redis æŸ¥æ‰¾touidå¯¹åº”çš„server ip
 	auto to_str = std::to_string(touid);
 	auto to_ip_key = USERIPPREFIX + to_str;
 	std::string to_ip_value = "";
@@ -357,11 +358,11 @@ void LogicSystem::DealChatTextMsg(std::shared_ptr<CSession> session, const short
 
 	auto& cfg = ConfigMgr::Inst();
 	auto self_name = cfg["SelfServer"]["Name"];
-	//Ö±½ÓÍ¨Öª¶Ô·½ÓĞÁÄÌìÏûÏ¢
+	//ç›´æ¥é€šçŸ¥å¯¹æ–¹æœ‰èŠå¤©æ¶ˆæ¯
 	if (to_ip_value == self_name) {
 		auto session = UserMgr::GetInstance()->GetSession(touid);
 		if (session) {
-			//ÔÚÄÚ´æÖĞÔòÖ±½Ó·¢ËÍÍ¨Öª¶Ô·½
+			//åœ¨å†…å­˜ä¸­åˆ™ç›´æ¥å‘é€é€šçŸ¥å¯¹æ–¹
 			std::string return_str = rtvalue.toStyledString();
 			session->Send(return_str, ID_NOTIFY_TEXT_CHAT_MSG_REQ);
 		}
@@ -382,59 +383,85 @@ void LogicSystem::DealChatTextMsg(std::shared_ptr<CSession> session, const short
 		text_msg->set_msgcontent(content);
 	}
 
-	//·¢ËÍÍ¨Öª todo...
+	//å‘é€é€šçŸ¥ todo...
 	ChatGrpcClient::GetInstance()->NotifyTextChatMsg(to_ip_value, text_msg_req, rtvalue);
 }
 
-void LogicSystem::DealMsg() {
-	for (;;) {
-		std::unique_lock<std::mutex> unique_lk(_mutex);
+// ---------------------------------------------------------------------------
+// å”¯ä¸€ FIFO ä¸å•æ¶ˆè´¹è€…çš„æƒ°æ€§å¯åŠ¨ã€‚
+//
+// ç»„ä»¶æ˜¯ SerializedWorkExecutor<LogicWorDispaktcher>ï¼ˆç”Ÿäº§å®ç°ï¼Œæµ‹è¯•æ‰§è¡ŒåŒä¸€ä»½ä»£ç ï¼‰ï¼š
+//   - ä¸€æ¡ FIFOï¼šlegacy æ¶ˆæ¯ã€Meeting å‘½ä»¤ã€SESSION_DISCONNECTEDã€FINALIZE_CLOSE å…±ç”¨ï¼›
+//   - ä¸€ä¸ªæ¶ˆè´¹è€…çº¿ç¨‹ï¼šå”¯ä¸€å†³å®š Meeting mutation é¡ºåºçš„æ‰§è¡Œä¸Šä¸‹æ–‡ï¼›
+//   - é˜Ÿåˆ—é”åªåœ¨"ç­‰å¾… + å–å‡º"æœŸé—´æŒæœ‰ï¼Œåˆ†å‘ä¸€å¾‹åœ¨é”å¤–è¿›è¡Œï¼Œ
+//     å› æ­¤ Close åœ¨åˆ†å‘è¿‡ç¨‹ä¸­å‘åŒä¸€é˜Ÿåˆ—è¿½åŠ  FINALIZE_CLOSE ä¸ä¼šæ­»é”ã€‚
+// ---------------------------------------------------------------------------
+void LogicSystem::EnsureWorkQueueStarted() {
+	std::call_once(_work_start_once, [this]() {
+		// M4 é˜¶æ®µå°šæ—  transport adapter æä¾›çœŸå®èŠ‚ç‚¹æ ‡è¯†ï¼Œè¿™é‡Œä½¿ç”¨ä¸€ä¸ªç¨³å®šçš„æœ¬åœ°
+		// æ ‡è¯†ï¼›å®ƒåªç”¨äºæ„é€  MeetingRequestContext.handling_chat_server_idï¼Œ
+		// ä¸å‚ä¸æŒä¹…åŒ–ï¼Œä¹Ÿä¸æ˜¯ç½‘ç»œåè®®å­—æ®µã€‚
+		_local_server_id = "local-chatserver";
 
-		//ÅĞ¶Ï¶ÓÁĞÎª¿ÕÔòÓÃÌõ¼ş±äÁ¿µÈ´ı
-		while (_msg_que.empty() && !_b_stop) {
-			_consume.wait(unique_lk);
-		}
+		_dispatcher.reset(new LogicWorkDispatcher(
+			_local_server_id, MakeSystemMeetingWorkDependencies(), nullptr));
 
-		//ÅĞ¶ÏÈç¹ûÎª¹Ø±Õ×´Ì¬£¬ÔòÈ¡³öÂß¼­¶ÓÁĞÖĞËùÓĞÊı¾İ£¬¼°Ê±´¦Àí²¢ÍË³öÑ­»·
-		if (_b_stop) {
-			while (!_msg_que.empty()) {
-				auto msg_node = _msg_que.front();
-				std::cout << "recv msg id is " << msg_node->_recvnode->_msg_id << std::endl;
-				auto call_back_iter = _fun_callbacks.find(msg_node->_recvnode->_msg_id);
-				if (call_back_iter != _fun_callbacks.end()) {
-					call_back_iter->second(msg_node->_session, msg_node->_recvnode->_msg_id,
-						std::string(msg_node->_recvnode->_data, msg_node->_recvnode->_cur_len));
-				}
-				_msg_que.pop();
-			}
-			break;
-		}
+		_work_executor.reset(new SerializedWorkExecutor<LogicWorkDispatcher>(*_dispatcher, this));
+	});
+}
 
-		// Èç¹ûÃ»ÓĞÍ£·ş£¬²¢ÇÒ¶ÓÁĞÖĞÓĞÊı¾İ
-		auto msg_node = _msg_que.front();
-		std::cout << "recv msg id is " << msg_node->_recvnode->_msg_id << std::endl;
-		auto call_back_iter = _fun_callbacks.find(msg_node->_recvnode->_msg_id);
-		if (call_back_iter != _fun_callbacks.end()) {
-			call_back_iter->second(msg_node->_session, msg_node->_recvnode->_msg_id,
-				std::string(msg_node->_recvnode->_data, msg_node->_recvnode->_cur_len));
-		}
-		_msg_que.pop();
+void LogicSystem::RouteExternalMessage(const std::shared_ptr<LogicNode>& msg) {
+	// ä¸æ—§ DealMsg å†…è”ä»£ç ä¿æŒåŒä¸€è¯­ä¹‰ï¼šå…ˆæ‰“å° msg_idï¼Œå†æŒ‰ msg_id æŸ¥è¡¨ï¼Œ
+	// å‘½ä¸­åˆ™è°ƒç”¨ï¼Œæœªå‘½ä¸­åˆ™å¿½ç•¥ã€‚å·®åˆ«åªæœ‰ä¸¤å¤„ï¼Œä¸”éƒ½æ˜¯ M4 çš„ç»“æ„è¦æ±‚ï¼š
+	//   1. æœ¬å‡½æ•°ç”±æ¶ˆè´¹è€…åœ¨**é˜Ÿåˆ—é”ä¹‹å¤–**è°ƒç”¨ï¼ˆæ—§å®ç°æŒé”æ‰§è¡Œå›è°ƒï¼‰ï¼›
+	//   2. å¢åŠ äº†å¿…è¦çš„ç©ºæŒ‡é’ˆä¿æŠ¤ï¼ˆæ—§å®ç°ç›´æ¥è§£å¼•ç”¨ï¼‰ã€‚
+	if (!msg || !msg->_recvnode) {
+		return;
+	}
+
+	std::cout << "recv msg id is " << msg->_recvnode->_msg_id << std::endl;
+
+	auto call_back_iter = _fun_callbacks.find(msg->_recvnode->_msg_id);
+	if (call_back_iter != _fun_callbacks.end()) {
+		call_back_iter->second(msg->_session, msg->_recvnode->_msg_id,
+			std::string(msg->_recvnode->_data, msg->_recvnode->_cur_len));
 	}
 }
 
 void LogicSystem::PostMsgToQue(std::shared_ptr<LogicNode> msg) {
-	std::unique_lock<std::mutex> unique_lk(_mutex);
-	_msg_que.push(msg);
-	//ÓÉ0±äÎª1Ê±ËµÃ÷Ö®Ç°ÊÇ×èÈû£¬Òª»½ĞÑ
-	if (_msg_que.size() == 1) {
-		_consume.notify_one();
-	}
+	// å¯¹å¤–æ¥å£ä¸è°ƒç”¨ç‚¹ï¼ˆCSession::AsyncReadBodyï¼‰ä¿æŒä¸å˜ã€‚
+	EnsureWorkQueueStarted();
+	_work_executor->PostExternalMessage(msg);
+}
+
+bool LogicSystem::PostSessionDisconnectedWork(const meeting::SessionId& session_id) {
+	EnsureWorkQueueStarted();
+	return _work_executor->PostSessionDisconnected(session_id);
+}
+
+bool LogicSystem::PostMeetingCommandWork(const meeting::MeetingRequestContext& context,
+	ClientMeetingCommandKind command, const meeting::MeetingId& meeting_id) {
+	EnsureWorkQueueStarted();
+	return _work_executor->PostMeetingCommand(context, command, meeting_id);
+}
+
+bool LogicSystem::HasActiveMeeting(const meeting::MeetingId& meeting_id) const {
+	// åªè¯»æŸ¥è¯¢ï¼Œä¸è¿›å…¥ä¸²è¡ŒåŒ–è¾¹ç•Œï¼šä»…ç”¨äºè¯Šæ–­/é›†æˆè§‚æµ‹ã€‚
+	return _dispatcher != nullptr && _dispatcher->HasActiveMeeting(meeting_id);
+}
+
+bool LogicSystem::HasClosedSnapshot(const meeting::MeetingId& meeting_id) const {
+	return _dispatcher != nullptr && _dispatcher->HasClosedSnapshot(meeting_id);
 }
 
 LogicSystem::~LogicSystem() {
-	_b_stop = true;
-	_consume.notify_one();
-	_worker_thread.join();
+	// stop/drain è¯­ä¹‰ï¼šç½®åœæ­¢æ ‡å¿—å¹¶å”¤é†’æ¶ˆè´¹è€…ï¼Œç„¶åç­‰å®ƒæŠŠå·²æ¥æ”¶çš„ work å…¨éƒ¨å¤„ç†å®Œã€‚
+	// å› æ­¤ Close åœ¨æ‰§è¡Œä¸­æ’å…¥çš„ FINALIZE_CLOSE ä¸ä¼šè¢«é™é»˜ä¸¢å¼ƒï¼›stop ä¹‹åæ–°å¢çš„å¤–éƒ¨
+	// work ä¼šè¢«é˜Ÿåˆ—æ‹’ç»ï¼ˆLogicWorkQueue::Push è¿”å› falseï¼‰ã€‚
+	// StopAndJoin å†…éƒ¨ç»ä¸æŒæœ‰é˜Ÿåˆ—é”å» joinã€‚
+	if (_work_executor) {
+		_work_executor->StopAndJoin();
+	}
 }
 
 bool LogicSystem::isPureDigit(const std::string& str)
@@ -453,7 +480,7 @@ void LogicSystem::GetUserByUid(std::string uid_str, Json::Value& rtvalue)
 
 	std::string base_key = USER_BASE_INFO + uid_str;
 
-	//ÓÅÏÈ²éredisÖĞ²éÑ¯ÓÃ»§ĞÅÏ¢
+	//ä¼˜å…ˆæŸ¥redisä¸­æŸ¥è¯¢ç”¨æˆ·ä¿¡æ¯
 	std::string info_str = "";
 	bool b_base = RedisMgr::GetInstance()->Get(base_key, info_str);
 	if (b_base) {
@@ -483,8 +510,8 @@ void LogicSystem::GetUserByUid(std::string uid_str, Json::Value& rtvalue)
 	}
 
 	auto uid = std::stoi(uid_str);
-	//redisÖĞÃ»ÓĞÔò²éÑ¯mysql
-	//²éÑ¯Êı¾İ¿â
+	//redisä¸­æ²¡æœ‰åˆ™æŸ¥è¯¢mysql
+	//æŸ¥è¯¢æ•°æ®åº“
 	std::shared_ptr<UserInfo> user_info = nullptr;
 	user_info = MysqlMgr::GetInstance()->GetUser(uid);
 	if (user_info == nullptr) {
@@ -492,7 +519,7 @@ void LogicSystem::GetUserByUid(std::string uid_str, Json::Value& rtvalue)
 		return;
 	}
 
-	//½«Êı¾İ¿âÄÚÈİĞ´Èëredis»º´æ
+	//å°†æ•°æ®åº“å†…å®¹å†™å…¥redisç¼“å­˜
 	Json::Value redis_root;
 	redis_root["uid"] = user_info->uid;
 	redis_root["pwd"] = user_info->pwd;
@@ -505,7 +532,7 @@ void LogicSystem::GetUserByUid(std::string uid_str, Json::Value& rtvalue)
 
 	RedisMgr::GetInstance()->Set(base_key, redis_root.toStyledString());
 
-	//·µ»ØÊı¾İ
+	//è¿”å›æ•°æ®
 	rtvalue["uid"] = user_info->uid;
 	rtvalue["pwd"] = user_info->pwd;
 	rtvalue["name"] = user_info->name;
@@ -522,7 +549,7 @@ void LogicSystem::GetUserByName(std::string name, Json::Value& rtvalue)
 
 	std::string base_key = NAME_INFO + name;
 
-	//ÓÅÏÈ²éredisÖĞ²éÑ¯ÓÃ»§ĞÅÏ¢
+	//ä¼˜å…ˆæŸ¥redisä¸­æŸ¥è¯¢ç”¨æˆ·ä¿¡æ¯
 	std::string info_str = "";
 	bool b_base = RedisMgr::GetInstance()->Get(base_key, info_str);
 	if (b_base) {
@@ -549,8 +576,8 @@ void LogicSystem::GetUserByName(std::string name, Json::Value& rtvalue)
 		return;
 	}
 
-	//redisÖĞÃ»ÓĞÔò²éÑ¯mysql
-	//²éÑ¯Êı¾İ¿â
+	//redisä¸­æ²¡æœ‰åˆ™æŸ¥è¯¢mysql
+	//æŸ¥è¯¢æ•°æ®åº“
 	std::shared_ptr<UserInfo> user_info = nullptr;
 	user_info = MysqlMgr::GetInstance()->GetUser(name);
 	if (user_info == nullptr) {
@@ -558,7 +585,7 @@ void LogicSystem::GetUserByName(std::string name, Json::Value& rtvalue)
 		return;
 	}
 
-	//½«Êı¾İ¿âÄÚÈİĞ´Èëredis»º´æ
+	//å°†æ•°æ®åº“å†…å®¹å†™å…¥redisç¼“å­˜
 	Json::Value redis_root;
 	redis_root["uid"] = user_info->uid;
 	redis_root["pwd"] = user_info->pwd;
@@ -570,7 +597,7 @@ void LogicSystem::GetUserByName(std::string name, Json::Value& rtvalue)
 
 	RedisMgr::GetInstance()->Set(base_key, redis_root.toStyledString());
 
-	//·µ»ØÊı¾İ
+	//è¿”å›æ•°æ®
 	rtvalue["uid"] = user_info->uid;
 	rtvalue["pwd"] = user_info->pwd;
 	rtvalue["name"] = user_info->name;
@@ -581,7 +608,7 @@ void LogicSystem::GetUserByName(std::string name, Json::Value& rtvalue)
 }
 
 bool LogicSystem::GetBaseInfo(std::string base_key, int uid, std::shared_ptr<UserInfo>& userinfo) {
-	//ÓÅÏÈ²éredisÖĞ²éÑ¯ÓÃ»§ĞÅÏ¢
+	//ä¼˜å…ˆæŸ¥redisä¸­æŸ¥è¯¢ç”¨æˆ·ä¿¡æ¯
 	std::string info_str = "";
 	bool b_base = RedisMgr::GetInstance()->Get(base_key, info_str);
 	if (b_base) {
@@ -600,8 +627,8 @@ bool LogicSystem::GetBaseInfo(std::string base_key, int uid, std::shared_ptr<Use
 			<< userinfo->name << " pwd is " << userinfo->pwd << " email is " << userinfo->email << std::endl;
 	}
 	else {
-		//redisÖĞÃ»ÓĞÔò²éÑ¯mysql
-		//²éÑ¯Êı¾İ¿â
+		//redisä¸­æ²¡æœ‰åˆ™æŸ¥è¯¢mysql
+		//æŸ¥è¯¢æ•°æ®åº“
 		std::shared_ptr<UserInfo> user_info = nullptr;
 		user_info = MysqlMgr::GetInstance()->GetUser(uid);
 		if (user_info == nullptr) {
@@ -610,7 +637,7 @@ bool LogicSystem::GetBaseInfo(std::string base_key, int uid, std::shared_ptr<Use
 
 		userinfo = user_info;
 
-		//½«Êı¾İ¿âÄÚÈİĞ´Èëredis»º´æ
+		//å°†æ•°æ®åº“å†…å®¹å†™å…¥redisç¼“å­˜
 		Json::Value redis_root;
 		redis_root["uid"] = uid;
 		redis_root["pwd"] = userinfo->pwd;
@@ -628,12 +655,12 @@ bool LogicSystem::GetBaseInfo(std::string base_key, int uid, std::shared_ptr<Use
 
 bool LogicSystem::GetFriendApplyInfo(int to_uid, std::vector<std::shared_ptr<ApplyInfo>>& list)
 {
-	//´Ómysql»ñÈ¡ºÃÓÑÉêÇëÁĞ±í
-	return MysqlMgr::GetInstance()->GetApplyList(to_uid, list, 0, 10);	// 0ºÍ10Ö»ÊÇ²âÊÔÓÃ
+	//ä»mysqlè·å–å¥½å‹ç”³è¯·åˆ—è¡¨
+	return MysqlMgr::GetInstance()->GetApplyList(to_uid, list, 0, 10);	// 0å’Œ10åªæ˜¯æµ‹è¯•ç”¨
 }
 
 bool LogicSystem::GetFriendList(int self_id, std::vector<std::shared_ptr<UserInfo>>& user_list)
 {
-	//´Ómysql»ñÈ¡ºÃÓÑÁĞ±í
+	//ä»mysqlè·å–å¥½å‹åˆ—è¡¨
 	return MysqlMgr::GetInstance()->GetFriendList(self_id, user_list);
 }

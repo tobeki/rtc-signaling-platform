@@ -52,6 +52,7 @@ set(CHATSERVER_APPLICATION_SOURCES
     CServer.cpp
     CSession.cpp
     LogicSystem.cpp
+    LogicWorkDispatcher.cpp
     MsgNode.cpp
     MysqlDao.cpp
     MysqlMgr.cpp
@@ -219,6 +220,11 @@ target_link_libraries(ChatServer PRIVATE
     protobuf::libprotobuf
     gRPC::grpc++
     "${CHATSERVER_MYSQLCPPCONN_LIBRARY}"
+    # M4: the ChatServer executable now really consumes the Meeting Core.
+    # Before M4 the link line deliberately had no libMeetingDomain; the LogicSystem
+    # execution context now owns the MeetingService and serializes every mutation,
+    # so the dependency is genuine rather than speculative.
+    MeetingDomain
 )
 
 # ------------------------------------------------------------------------------
@@ -237,9 +243,9 @@ target_link_libraries(ChatServer PRIVATE
 # MeetingService adds no thread, lock, timer or async task: it assumes the
 # caller supplies the single-writer serialization boundary (M4).
 #
-# The ChatServer executable deliberately does NOT link this target yet: no
-# network adapter consumes the Meeting Core until M4. The library is built and
-# exercised by the unit tests only.
+# The ChatServer executable links this target since M4: the unified serialized
+# work queue in LogicSystem is the only consumer of the Meeting Core, and it is
+# the only execution context allowed to mutate it.
 # ------------------------------------------------------------------------------
 add_library(MeetingDomain STATIC
     meeting/MeetingAggregate.cpp
