@@ -1,6 +1,7 @@
 #pragma once
 #include "Singleton.h"
 #include "LogicWorkDispatcher.h"
+#include "SessionDisconnectBridge.h"
 #include <memory>
 #include <map>
 #include <mutex>
@@ -18,7 +19,11 @@
 class CServer;
 typedef  std::function<void(std::shared_ptr<CSession> session, const short& msg_id, const std::string& msg_data)> FunCallBack;
 
-class LogicSystem :public Singleton<LogicSystem>, public ILegacyMessageRouter
+// M5：LogicSystem 同时是断线事件的投递目标。
+// 网络层（CSession）只通过 ISessionDisconnectSink 这一抽象把稳定 SessionId 交进来，
+// 由 LogicSystem 负责把它变成 SESSION_DISCONNECTED work item 并投入唯一 FIFO。
+// 因此"网络线程不得直接改 Meeting"是结构约束，而不是调用方纪律。
+class LogicSystem :public Singleton<LogicSystem>, public ILegacyMessageRouter, public ISessionDisconnectSink
 {
 	friend class Singleton<LogicSystem>;
 public:
@@ -34,7 +39,11 @@ public:
 	void RouteExternalMessage(const std::shared_ptr<LogicNode>& msg);
 
 	// 已键入的内部入队条目（单个 FIFO，与传统消息和会议命令具有相同的排序域）。
-	bool PostSessionDisconnectedWork(const meeting::SessionId& session_id);
+	// M5：本函数同时是 ISessionDisconnectSink 的唯一实现，也就是断线事件进入
+	// 唯一 FIFO 的唯一入口。参数只允许是稳定 SessionId 的值拷贝：
+	// 不持有 CSession / socket / 连接对象，也**不**直接调用 MeetingService。
+	// 返回 false 表示队列已在停止路径上（M4 §11.2：stop 之后的外部 work 一律丢弃）。
+	bool PostSessionDisconnectedWork(const meeting::SessionId& session_id) override;
 	bool PostMeetingCommandWork(const meeting::MeetingRequestContext& context,
 		ClientMeetingCommandKind command, const meeting::MeetingId& meeting_id);
 

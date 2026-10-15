@@ -29,6 +29,10 @@ add_executable(ChatServerUnitTests
     MeetingAggregateTest.cpp
     MeetingServiceTest.cpp
     LogicWorkQueueTest.cpp
+    # M5: the transport disconnect bridge. SessionDisconnectBridge.h is
+    # header-only on purpose, so this test file needs no extra translation unit
+    # and the Windows .vcxproj source list gains nothing either.
+    SessionDisconnectBridgeTest.cpp
     # M4: the unified work queue/dispatcher implementation. It is added to the
     # test target as SOURCE (not linked through the ChatServer executable) so the
     # tests exercise the production implementation itself while staying free of

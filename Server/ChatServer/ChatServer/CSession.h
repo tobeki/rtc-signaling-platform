@@ -10,6 +10,7 @@
 #include <memory>
 #include "const.h"
 #include "MsgNode.h"
+#include "SessionDisconnectBridge.h"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -36,6 +37,10 @@ public:
 	void AsyncReadBody(int length);
 	void AsyncReadHead(int total_len);
 private:
+	// M5：会话生命周期终止的统一通知点。可重复、可并发调用；
+	// 桥接内部保证同一个会话最多投递一次断线事件。
+	void NotifySessionDisconnected();
+
 	void asyncReadFull(std::size_t maxLength, std::function<void(const boost::system::error_code&, std::size_t)> handler);
 	void asyncReadLen(std::size_t  read_len, std::size_t total_len,
 		std::function<void(const boost::system::error_code&, std::size_t)> handler);
@@ -49,13 +54,16 @@ private:
 	bool _b_close;
 	std::queue<std::shared_ptr<SendNode> > _send_que;
 	std::mutex _send_lock;
-	//�յ�����Ϣ�ṹ
+	//收到的消息结构
 	std::shared_ptr<RecvNode> _recv_msg_node;
 	bool _b_head_parse;
-	//�յ���ͷ���ṹ
+	//收到的头部结构
 	std::shared_ptr<MsgNode> _recv_head_node;
-	//session ��
+	//session 锁
 	std::mutex _session_mtx;
+	// M5：断线桥接。只保存稳定 SessionId 与投递目标，绝不保存 CSession / socket；
+	// 它是"网络层 → 唯一 FIFO"的唯一入口。
+	SessionDisconnectBridge _disconnect_bridge;
 };
 
 class LogicNode {

@@ -434,6 +434,14 @@ void LogicSystem::PostMsgToQue(std::shared_ptr<LogicNode> msg) {
 	_work_executor->PostExternalMessage(msg);
 }
 
+// ISessionDisconnectSink 的实现，也是断线事件进入唯一 FIFO 的唯一入口。
+//
+// 契约（M5）：
+//   - 只接受稳定 SessionId 的值拷贝；这里不保存、也不可能取得 CSession；
+//   - 不直接调用 MeetingService：事件必须作为 SESSION_DISCONNECTED work item
+//     排进与 legacy 消息、Meeting 命令**同一个** FIFO，由单消费者决定其顺序；
+//   - 真正的领域处理是 LogicWorkDispatcher::SessionDisconnected，属于消费者线程。
+// 因此"断线不会绕过已排队的 legacy 消息"由队列本身保证，而不是靠调用方时机。
 bool LogicSystem::PostSessionDisconnectedWork(const meeting::SessionId& session_id) {
 	EnsureWorkQueueStarted();
 	return _work_executor->PostSessionDisconnected(session_id);
