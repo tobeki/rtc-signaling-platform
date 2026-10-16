@@ -33,6 +33,10 @@ add_executable(ChatServerUnitTests
     # header-only on purpose, so this test file needs no extra translation unit
     # and the Windows .vcxproj source list gains nothing either.
     SessionDisconnectBridgeTest.cpp
+    # M5.1: domain session lifecycle (accept -> CONNECTED, login -> AUTHENTICATED,
+    # disconnect -> CLOSED) driven through the same production typed work items and
+    # the real SerializedWorkExecutor<LogicWorkDispatcher>.
+    DomainSessionLifecycleTest.cpp
     # M4: the unified work queue/dispatcher implementation. It is added to the
     # test target as SOURCE (not linked through the ChatServer executable) so the
     # tests exercise the production implementation itself while staying free of

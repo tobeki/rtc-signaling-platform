@@ -238,6 +238,14 @@ struct MeetingCommandOutcome {
     // 而不是靠日志目测。它只承载 MeetingView 已有的值，不新增领域语义。
     meeting::MeetingState meeting_state = meeting::MeetingState::CREATED;
     bool has_closed_at = false;
+
+    // M5.1：MeetingView.active_participant_count 的只读投影。
+    //
+    // 存在的理由是"生命周期接线必须可证"：MEETING_COMMAND 的响应里本来就带着参与者
+    // 计数，但观测结构此前没有暴露它，于是"最后一个 Session 断线导致 participant_count - 1"
+    // 这类断言只能靠事件次数间接推断。这里只做**值拷贝**，不新增也不改变任何领域规则。
+    std::size_t active_participant_count = 0;
+
     std::vector<meeting::EventType> event_types;
 };
 

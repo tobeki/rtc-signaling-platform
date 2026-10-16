@@ -124,6 +124,16 @@ void LogicSystem::LoginHandler(std::shared_ptr<CSession> session, const short& m
 	//session绑定用户uid
 	session->SetUserId(uid);
 
+	// M5.1：只有走到这里才算 legacy 登录真正成功（token 校验、base info、SetUserId
+	// 都已完成），此时才把认证事件交给唯一 FIFO。刻意使用上面已验证成功的局部变量 uid，
+	// 而不是 CSession 里未初始化的 _user_uid；所有 early return 的失败路径都不会投递。
+	if (!PostSessionAuthenticateWork(session->GetSessionId(), uid)) {
+		// 执行器已进入停止路径（shutdown）：不改变 legacy 登录协议语义、不重试、
+		// 也不建立第二条异步路径，只如实记录这次认证事件被拒绝。
+		std::cout << "authentication work rejected because serialized executor is stopping, session: "
+			<< session->GetSessionId() << std::endl;
+	}
+
 	//为用户设置登录ip server的名字
 	std::string ipkey = USERIPPREFIX + uid_str;
 	RedisMgr::GetInstance()->Set(ipkey, server_name);
@@ -445,6 +455,27 @@ void LogicSystem::PostMsgToQue(std::shared_ptr<LogicNode> msg) {
 bool LogicSystem::PostSessionDisconnectedWork(const meeting::SessionId& session_id) {
 	EnsureWorkQueueStarted();
 	return _work_executor->PostSessionDisconnected(session_id);
+}
+
+// M5.1：TCP accept 成功后的领域 Session 登记入口。
+//
+// 只接受稳定 SessionId 的值拷贝（不持有 CSession / socket / CServer），并与断线事件
+// 走**同一条** FIFO：因此同一会话的 REGISTER 与 DISCONNECT 之间的先后完全由真实入队
+// 次序决定，不需要任何额外同步或第二条队列。
+bool LogicSystem::PostSessionRegisterWork(const meeting::SessionId& session_id) {
+	EnsureWorkQueueStarted();
+	return _work_executor->PostSessionRegister(session_id);
+}
+
+// M5.1：legacy 登录成功后的领域 Session 认证入口。
+//
+// user_id 必须来自 LoginHandler 中**已经验证成功**的局部变量 uid，绝不读取
+// CSession::_user_uid：该成员在 CSession 构造时未初始化，用它做领域身份会把网络层
+// 的既有缺陷引入领域状态（M5.1 §22）。
+bool LogicSystem::PostSessionAuthenticateWork(const meeting::SessionId& session_id,
+	meeting::UserId user_id) {
+	EnsureWorkQueueStarted();
+	return _work_executor->PostSessionAuthenticate(session_id, user_id);
 }
 
 bool LogicSystem::PostMeetingCommandWork(const meeting::MeetingRequestContext& context,

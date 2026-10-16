@@ -208,6 +208,7 @@ void LogicWorkDispatcher::DispatchCreate(const LogicWorkItem& item) {
             MakeCommandOutcome(item.meeting_command, result.meeting.meeting_id, result.common);
         outcome.meeting_state = result.meeting.meeting_state;
         outcome.has_closed_at = result.meeting.has_closed_at;
+        outcome.active_participant_count = result.meeting.active_participant_count;
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
     }
@@ -222,6 +223,7 @@ void LogicWorkDispatcher::DispatchJoin(const LogicWorkItem& item) {
             MakeCommandOutcome(item.meeting_command, item.meeting_id, result.common);
         outcome.meeting_state = result.meeting.meeting_state;
         outcome.has_closed_at = result.meeting.has_closed_at;
+        outcome.active_participant_count = result.meeting.active_participant_count;
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
     }
@@ -236,6 +238,7 @@ void LogicWorkDispatcher::DispatchLeave(const LogicWorkItem& item) {
             MakeCommandOutcome(item.meeting_command, item.meeting_id, result.common);
         outcome.meeting_state = result.meeting.meeting_state;
         outcome.has_closed_at = result.meeting.has_closed_at;
+        outcome.active_participant_count = result.meeting.active_participant_count;
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
     }
@@ -255,6 +258,7 @@ void LogicWorkDispatcher::DispatchClose(const LogicWorkItem& item) {
         outcome.should_schedule_finalize = result.should_schedule_finalize;
         outcome.meeting_state = result.meeting.meeting_state;
         outcome.has_closed_at = result.meeting.has_closed_at;
+        outcome.active_participant_count = result.meeting.active_participant_count;
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
     }
@@ -282,6 +286,7 @@ void LogicWorkDispatcher::DispatchQuery(const LogicWorkItem& item) {
             MakeCommandOutcome(item.meeting_command, item.meeting_id, result.common);
         outcome.meeting_state = result.meeting.meeting_state;
         outcome.has_closed_at = result.meeting.has_closed_at;
+        outcome.active_participant_count = result.meeting.active_participant_count;
         sink_->RecordMeetingCommand(outcome);
     }
 }
@@ -295,6 +300,7 @@ void LogicWorkDispatcher::DispatchListParticipants(const LogicWorkItem& item) {
             MakeCommandOutcome(item.meeting_command, item.meeting_id, result.common);
         outcome.meeting_state = result.meeting.meeting_state;
         outcome.has_closed_at = result.meeting.has_closed_at;
+        outcome.active_participant_count = result.meeting.active_participant_count;
         sink_->RecordMeetingCommand(outcome);
     }
 }

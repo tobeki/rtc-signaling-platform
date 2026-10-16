@@ -44,6 +44,18 @@ public:
 	// 不持有 CSession / socket / 连接对象，也**不**直接调用 MeetingService。
 	// 返回 false 表示队列已在停止路径上（M4 §11.2：stop 之后的外部 work 一律丢弃）。
 	bool PostSessionDisconnectedWork(const meeting::SessionId& session_id) override;
+
+	// M5.1：真实 CSession 生命周期进入唯一 FIFO 的两个 typed 入口。
+	//
+	// 二者与 PostSessionDisconnectedWork 完全同构：只把稳定值（SessionId / UserId）交给
+	// 唯一的串行化执行器，绝不直接触碰 MeetingService，也不新建第二条队列或第二个 worker。
+	//   - Register    ：TCP accept 成功之后调用（CServer::HandleAccept 的成功分支）；
+	//   - Authenticate：legacy 登录真正成功之后调用（LogicSystem::LoginHandler 尾部）。
+	// 返回 false 表示队列已停止接收（shutdown 路径），调用方只记录、不重试。
+	bool PostSessionRegisterWork(const meeting::SessionId& session_id);
+	bool PostSessionAuthenticateWork(const meeting::SessionId& session_id,
+		meeting::UserId user_id);
+
 	bool PostMeetingCommandWork(const meeting::MeetingRequestContext& context,
 		ClientMeetingCommandKind command, const meeting::MeetingId& meeting_id);
 
