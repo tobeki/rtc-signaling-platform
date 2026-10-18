@@ -1,13 +1,13 @@
 # Phase 2 - M6：Response / Notification Adapter
 
-> 状态：**DESIGN COMPLETE（M6.0 → M6.0.5 五轮修订；Coding NOT STARTED）**
+> 状态：**DESIGN COMPLETE（M6.0 → M6.0.6 六轮修订；Coding NOT STARTED）**
 > Phase 2 M-planning 原始基线：`da19189a55ab13058a22c38c228d3043df72bdf6`（M5.1 收尾）
 > 本文档首次提交：`afad0644170b0882ee6b58ed99c493e82909a70f`（`docs(phase2): add M6-response-notification-adapter.md`）
 > 已发布的 M6.0 基线：`3456c7f96767ea23c59f856aca12ba50deb41699`
 > 已发布的 M6.0.1 基线：`1454a8a5d6ec2a4c7238244c98f5f578e5bb2904`
 > `2ffd083…`（M6.0.2 修订提交）：**M6.0.3 修订的起点基线，已不是当前远端**
-> 已发布的 M6.0.4 基线：`8653a695fb4d794e0127224ef3ec60968bb0d916`
-> 本文档当前修订：**M6.0.5 — Startup Exception Safety & Redis Contract Review**（待人工 Review；工作区状态见 §1.3 与 §24）
+> M6.0.4 发布时的历史基线：`8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**）
+> 本文档当前修订：**M6.0.6 — Resource Handoff and Initialization Failure Audit**（待人工 Review；工作区状态见 §1.3 与 §24）
 > M6 Coding：**NOT STARTED**（Final Coding Gate 由人工 Review 决定）
 
 ---
@@ -23,9 +23,10 @@
 | **已发布的 M6.0 基线** | `3456c7f96767ea23c59f856aca12ba50deb41699` — `docs(phase2): adjudicate M6 design - transport-neutral outbound boundary` |
 | **已发布的 M6.0.1 基线** | `1454a8a5d6ec2a4c7238244c98f5f578e5bb2904` — `docs(phase2): adjudicate M6 design` |
 | **历史基线（仅供追溯）** | `2ffd08330a2047c6cf74fafba07f0f0a675a4f7f` — M6.0.2 修订提交，也是 **M6.0.3 修订的起点基线**；**已不是当前远端** |
-| **已发布的 M6.0.4 基线** | `8653a695fb4d794e0127224ef3ec60968bb0d916` — `docs(phase2): align M6 acceptance and risk text with the shipped shutdown design` |
-| 本修订轮次 | **M6.0.5 — Startup Exception Safety & Redis Contract Review**（待 Review） |
-| 本修订依据 | 对 `8653a69`（文档）与当前源码（AsioIOServicePool / RedisMgr / ChatServer）+ 本机 gRPC 1.51.1 头文件的只读复核；**未修改任何代码** |
+| **已发布的 M6.0.5 基线（上一轮）** | `b116ccc084bc7e9b6ab21931722e2d8faaa193ee` — `docs(phase2): close the M6 startup thread-ownership gap and fix the HDel contract` |
+| **M6.0.4 发布时的历史基线** | `8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**，仅用于追溯） |
+| 本修订轮次 | **M6.0.6 — Resource Handoff and Initialization Failure Audit**（待 Review） |
+| 本修订依据 | 对 `b116ccc`（文档）与当前源码（AsioIOServicePool / RedisMgr / ChatServer）+ 本机 gRPC 1.51.1 头文件的只读复核；**未修改任何代码** |
 | M6 Coding | **NOT STARTED** |
 | 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮零修改** |
 
@@ -115,18 +116,47 @@ E3  HDel 的 bool 契约写错了：旧文称 false 表示"字段不存在/无�
     reply 非 INTEGER。→ 改为中性诊断，四种来源逐一列举；B23 相应重写（§12.3.5.1 / §12.3.12）
 ```
 
+**M6.0.6（本轮）修正 M6.0.5 遗留的六处问题：**
+
+```text
+F1  gRPC 交接仍有异常窗口：`std::shared_ptr<grpc::Server> g(builder.BuildAndStart())`
+    需要**分配控制块**（可能抛），而 BuildAndStart 返回时 gRPC 已在服务。
+    "setter 是 noexcept" 只证明登记动作不抛，不能证明交接过程不抛。
+    → 改为协调器**独占 unique_ptr**，经 noexcept 移动转移（§12.3.5.2 / §12.3.5.3）
+
+F2  LogicSystem 登记顺序错误：先注册目录、后登记 LogicSystem。
+    若 LogicSystem 获取失败或其间抛异常，Cleanup 因 logic_ 为空而跳过
+    ShutdownWorkExecutor 与 ClearMeetingSessionDirectory。
+    → 先登记 LogicSystem，再注册目录（§12.3.6.2 阶段 7）
+
+F3  类 A 未拆分：F4 把 Redis 构造期失败说成"协调器清理 pool"，
+    但部分失败路径在协调器运行之前就已 terminate。
+    → 拆为 A-i / A-ii / A-iii / A-iv 四种，并逐项说明协调器是否有运行机会（§12.3.12.3）
+
+F4  nullptr 处理与 R-17 不一致：目标代码"登记空指针继续"，文档称"R-17 不修"。
+    → 明确改为**判空即抛**初始化异常，并把 R-17 重新表述为
+      "根因未修、后果显式化"的最小范围调整（§12.3.13 D-4 / §18 R-17）
+
+F5  ShutdownCoordinator 构造函数误加 noexcept：内部拷贝 std::string 可能抛。
+    → 去掉 noexcept，并说明该构造发生在任何后台线程之前，抛出是安全的（§12.3.5.2）
+
+F6  元数据把 8653a69 描述为当前远端。
+    → 改标为"M6.0.4 发布时的历史基线"，当前远端以动态 Git 规则判定（§1.3 / §24）
+```
+
 ### 1.3 提交状态（必须与远端事实一致）
 
 ```text
 基线（本轮进入时实测）:
-  origin/dev == HEAD == 8653a695fb4d794e0127224ef3ec60968bb0d916
-  ⇒ M6.0.4 修订已发布
-     （历史基线：M6.0 = 3456c7f、M6.0.1 = 1454a8a、M6.0.3 = 2ffd083，均已发布）
+  origin/dev == HEAD == b116ccc084bc7e9b6ab21931722e2d8faaa193ee
+  ⇒ M6.0.5 修订已发布
+     （历史基线：M6.0 = 3456c7f、M6.0.1 = 1454a8a、M6.0.3 = 2ffd083、
+       M6.0.4 = 8653a69，均已发布）
   ⇒ 进入本轮时 working tree / index 均 clean
 
-本轮（M6.0.5）:
+本轮（M6.0.6）:
   只修改本文件 docs/phase2/M6-response-notification-adapter.md
-  修订内容见 §1.2 的 E1–E3
+  修订内容见 §1.2 的 F1–F6
 
 本文档刻意**不**内嵌自身的 commit hash：任何 amend / rebase 都会让它立即过期。
 确认当前状态的唯一可靠方式是：
@@ -138,7 +168,7 @@ E3  HDel 的 bool 契约写错了：旧文称 false 表示"字段不存在/无�
 
 ⚠️ 历史更正：M6.0 曾记录"未推送"，M6.0.1/M6.0.2/M6.0.3 曾以更早的 hash 为基线 ——
    均为当时事实，之后都已推送。不得再把 1672888 / 3456c7f / 1454a8a / 2ffd083
-   当作"当前 HEAD"；`2ffd083` 只是 **M6.0.3 发布时**的历史基线。
+   当作"当前 HEAD"；`2ffd083` / `8653a69` 分别只是 **M6.0.3 / M6.0.4 发布时**的历史基线。
 ```
 
 ### 1.4 本修订对 Phase 1 的地位声明
@@ -1481,7 +1511,13 @@ class ShutdownCoordinator {
 public:
     // 空依赖构造：此时 pool/redis/grpc_server/tcp_server/logic 全部为空。
     // 本调用**不启动任何线程**，因此它可以在任何后台线程之前安全地建立。
-    explicit ShutdownCoordinator(const std::string& server_name) noexcept
+    //
+    // ⚠ 异常规格（M6.0.6 修正）：**不加 noexcept**。
+    //   构造函数需要拷贝 std::string（可能 bad_alloc），若声明 noexcept
+    //   则一旦分配失败会直接 std::terminate，而这是**不必要**的：
+    //   本构造发生在阶段 1，此时没有任何后台线程与已登记资源，
+    //   抛出异常只会导致"什么都没启动就退出"，是安全且可诊断的。
+    explicit ShutdownCoordinator(const std::string& server_name)
         : grpc_server_(), grpc_thread_(), pool_(), redis_(), logic_(),
           tcp_server_(), server_name_(server_name), done_(false) {}
 
@@ -1492,7 +1528,16 @@ public:
     // 不存在"已经拿到资源、但登记动作抛异常导致无人清理"的中间态。
     void SetPool(std::shared_ptr<AsioIOServicePool> pool) noexcept { pool_ = pool; }
     void SetRedis(std::shared_ptr<RedisMgr> redis) noexcept { redis_ = redis; }
-    void SetGrpcServer(std::shared_ptr<grpc::Server> server) noexcept { grpc_server_ = server; }
+
+    // grpc_server 采用 **unique_ptr 移动转移所有权**（M6.0.6 修正）：
+    //   · 不从裸指针构造 shared_ptr（那会**分配控制块**，可能抛 bad_alloc，
+    //     而 BuildAndStart() 返回时 gRPC 已经开始服务 ⇒ 抛异常就意味着
+    //     "已启动的服务无人负责"）；
+    //   · unique_ptr 的移动赋值是 noexcept，且 unique_ptr 本身不分配内存
+    //     ⇒ 交接过程**不存在**异常窗口。
+    void SetGrpcServer(std::unique_ptr<grpc::Server> server) noexcept {
+        grpc_server_ = std::move(server);
+    }
     void SetLogicSystem(LogicSystem* logic) noexcept { logic_ = logic; }
     // 方案 B：强引用；SetTcpServer() 成功之后协调器才持有 TCP Server
     void SetTcpServer(std::shared_ptr<CServer> tcp_server) noexcept { tcp_server_ = tcp_server; }
@@ -1586,7 +1631,10 @@ private:
     //   tcp_server_ → grpc_server_ → redis_ → pool_ 各自释放一个强引用；
     //   io_context 声明在协调器**之前**，因此比协调器**更晚**析构 ⇒ tcp_server
     //   在 io_context 仍存活时完成析构（CServer 持 io_context&）。
-    std::shared_ptr<grpc::Server>       grpc_server_;  // 强引用：保证兜底 Cleanup 时对象存活
+    // grpc_server_ 由协调器**独占**持有（unique_ptr）。
+    // 独占是可行的，也是更精确的：gRPC Server 不需要共享所有权，
+    // 只需要"在 Cleanup() 执行期间存活"，而它由协调器成员保证。
+    std::unique_ptr<grpc::Server>       grpc_server_;
     std::thread                         grpc_thread_;  // **按值持有**
     std::shared_ptr<AsioIOServicePool>  pool_;
     std::shared_ptr<RedisMgr>           redis_;
@@ -1601,31 +1649,69 @@ private:
 
 ##### 12.3.5.3 为什么"取得资源 → 登记责任"之间没有异常窗口
 
-```text
-对每一项资源 R：      auto r = R::GetInstance();   shutdown.SetR(r);
-先验证 SetR 不抛：
-  · SetPool / SetRedis / SetGrpcServer / SetTcpServer 内部仅执行 shared_ptr 拷贝赋值，
-    标准保证其**异常规格为 noexcept**；
-  · SetLogicSystem 内部仅执行裸指针赋值，noexcept。
-⇒ 若 GetInstance() 正常返回，则紧随的 SetR() 必定完成，责任登记不可能因异常而中断。
-⇒ 因此"R 的后台线程已启动但协调器尚未登记"这一中间态**不存在**。
+**逐项证明**（三种 setter 形态分别验证）：
 
-特别注意 GetInstance() 自身的失败（与上面的情况必须分开）：
-  · 它在失败时**没有返回任何对象**，因此没有"已启动的线程需要登记"；
-  · 但如 §12.3.12 所述，AsioIOServicePool / RedisConPool 的**构造函数内部**
-    若在启动部分线程后抛异常，其自身的析构并不会 join 这些线程
-    ⇒ 这是**既有代码的构造期缺陷**，协调器无法介入（对象尚未诞生）。
-    M6 不修改 GBK 的 AsioIOServicePool，也不修改 RedisMgr，因此**不声称覆盖**该情形。
+| setter | 入参形态 | 内部动作 | 是否可能抛 | 依据 |
+| --- | --- | --- | --- | --- |
+| `SetPool` / `SetRedis` / `SetTcpServer` | `std::shared_ptr<T>`（**按值**） | `shared_ptr` 拷贝赋值 | **否**（noexcept） | 标准规定 `shared_ptr` 的拷贝构造/拷贝赋值均为 `noexcept` |
+| `SetGrpcServer` | `std::unique_ptr<grpc::Server>`（**按值，移动**） | `unique_ptr` 移动赋值 | **否**（noexcept） | `unique_ptr` 移动赋值 noexcept，且**不分配任何内存** |
+| `SetLogicSystem` | `LogicSystem*` | 裸指针赋值 | **否** | 指针赋值不抛 |
+
+```text
+⇒ 若资源获取调用正常返回，则紧随的 SetXxx() 必定完成，责任登记不可能因异常而中断。
+⇒ 因此"资源已启动/已可用但协调器尚未登记"这一中间态**不存在**。
 ```
+
+**gRPC 这一项为什么必须是 `unique_ptr` 移动，而不能是 `shared_ptr` 构造**（M6.0.6 核心修正）：
+
+```text
+错误写法：  std::shared_ptr<grpc::Server> g(builder.BuildAndStart());
+  ① BuildAndStart() 返回时 gRPC **已经开始服务**（端口已监听、handler 可运行）；
+  ② 从裸指针构造 shared_ptr 需要**分配控制块**，该分配**可能抛 bad_alloc**；
+  ③ 若该分配抛异常：裸指针所指的 Server 会被 delete（标准要求调用删除器），
+     而 gRPC 正在服务的状态下被销毁本身就存在风险；更关键的是——
+     **"登记"这一步没有完成**，协调器不知道有这个 Server，
+     于是"谁负责 Shutdown 它"这个问题失去了答案。
+  ⇒ "setter 是 noexcept" 只能证明**登记动作**不抛，**不能**证明**交接过程**不抛。
+
+正确写法：  std::unique_ptr<grpc::Server> g(builder.BuildAndStart());   // noexcept，不分配
+            shutdown.SetGrpcServer(std::move(g));                        // noexcept，不分配
+  ① unique_ptr 从裸指针构造：**noexcept**，**不分配内存**；
+  ② unique_ptr 移动赋值：**noexcept**，**不分配内存**；
+  ⇒ 从"BuildAndStart 返回"到"协调器持有所有权"是**两个连续的 noexcept 操作**，
+    中间不存在任何可抛点 ⇒ 交接窗口为零。
+  ⇒ 与此同时 gRPC Server 的生命周期由协调器独占持有，Cleanup() 必然能看到它。
+```
+
+**关于 `SetMeetingSessionDirectory` 的异常规格（与本证明相关，M6.0.6 统一）**：
+
+```text
+契约：`void SetMeetingSessionDirectory(std::shared_ptr<IMeetingSessionDirectory>) noexcept`
+      内部仅做 weak_ptr 赋值（weak_ptr 赋值 noexcept）并置一次性标志。
+⇒ 目录注册**不可能抛异常**。因此：
+   · 文档不再要求"通过注入异常到目录注册来验证兜底路径"（那与 noexcept 契约自相矛盾）；
+   · 但目标代码仍**先**登记 LogicSystem、**再**注册目录（§12.3.6.2 阶段 7），
+     理由不是"注册会抛"，而是：LogicSystem 的**获取**(GetInstance) 本身可能抛，
+     而"登记 LogicSystem"是后续 Cleanup 能否关闭 executor / 清理目录的前提，
+     因此它必须尽可能早地完成，且不能被无关操作夹在中间。
+```
+
+**特别注意 `GetInstance()` 自身的失败（必须与上述分开）**：
+它失败时**没有返回任何对象**，因此没有"已启动的线程需要登记"。但如 §12.3.12.3
+所述，两个单例的**构造函数内部**若在启动部分线程后抛异常，其自身析构并不会 join
+这些线程 ⇒ 既有构造期缺陷，协调器无法介入（对象尚未诞生）。M6 **不声称覆盖**。
 
 #### 12.3.6 目标形态（启动顺序 + 声明顺序，M6.0.5 重排）
 
 ##### 12.3.6.1 声明顺序（析构顺序由它决定，且必须与线程/引用依赖相容）
 
 ```text
-声明 : io_context → signals → service → shutdown(协调器) → pool → redis
-       → grpc_server → tcp_server
-析构 : tcp_server → grpc_server → redis → pool → shutdown → service → signals → io_context
+声明 : io_context → signals → service → shutdown(协调器) → pool → redis → tcp_server
+析构 : tcp_server → redis → pool → shutdown → service → signals → io_context
+
+注：grpc_server **不再有 main 局部变量**（M6.0.6）：它是一个在阶段 5 创建、
+    随即以 unique_ptr 移动交给协调器的临时对象，其生命周期完全由协调器成员决定；
+    因此它不在上面的局部声明序列里，而在**协调器析构体内**销毁。
 ```
 
 三条约束决定了这个顺序：
@@ -1635,11 +1721,12 @@ private:
     （CServer 持 io_context& 与 tcp::acceptor，acceptor 析构需要 io_context 存活）。
     协调器持有 tcp_server 强引用，因此 tcp_server 在**协调器析构体内**才被销毁；
     只要 io_context 声明在协调器**之前**，它就晚于协调器析构 ⇒ 满足 (1)。
-(2) service 必须**先于** grpc_server 声明 ⇒ service 晚于 grpc_server 析构
-    （builder.RegisterService(&service)；handler 用 service，不能在 server 之前消失）。
+(2) service 必须**先于协调器**声明 ⇒ service 晚于协调器析构 ⇒ 也晚于 grpc_server 析构
+    （builder.RegisterService(&service)：gRPC handler 使用 service，
+    而 grpc_server 由协调器成员持有、在协调器析构体内销毁 ⇒ service 必须活得更久）。
 (3) 协调器必须**先于**任何后台线程的启动 ⇒ 见 12.3.6.2 的启动顺序。
-    协调器持有 pool/redis/grpc_server/tcp_server 的强引用，因此即使对应局部
-    shared_ptr 先析构，对象仍在协调器 Cleanup() 期间存活。
+    协调器持有 pool/redis/tcp_server 的 shared_ptr 强引用与 grpc_server 的**独占**
+    unique_ptr，因此即使对应局部 shared_ptr 先析构，对象仍在协调器 Cleanup() 期间存活。
 ```
 
 ##### 12.3.6.2 启动顺序（每取得一项资源立即登记）
@@ -1673,17 +1760,36 @@ int main()
         grpc::ServerBuilder builder;
         builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
         builder.RegisterService(&service);
-        std::shared_ptr<grpc::Server> grpc_server(builder.BuildAndStart());
-        shutdown.SetGrpcServer(grpc_server);          // noexcept
-        // 若 BuildAndStart() 返回空：既有缺陷（R-17），M6 不修；登记空指针是安全的
+
+        // (a) 先取裸指针并**先判空**：nullptr 视为初始化失败（见 §12.3.13 D-4 与 R-17）
+        grpc::Server* grpc_server_raw = builder.BuildAndStart();
+        if (grpc_server_raw == nullptr) {
+            // 已登记 pool/redis 仍由协调器兜底清理（阶段 2/3 已完成）
+            throw std::runtime_error("grpc BuildAndStart() returned nullptr; aborting startup");
+        }
+        // (b) unique_ptr 从裸指针构造：noexcept，**不分配内存**
+        std::unique_ptr<grpc::Server> grpc_server(grpc_server_raw);
+        // (c) 移动转移所有权：noexcept，**不分配内存**
+        //     ⇒ (a)(b)(c) 三步之间**没有可抛点** ⇒ 交接窗口为零（§12.3.5.3）
+        shutdown.SetGrpcServer(std::move(grpc_server));
+        // 此后 gRPC Server 由协调器独占持有；Cleanup() 的步骤 1a 必然能看到它
 
         // ---- 阶段 6：TCP Server（需要 io_context 存活）→ 立即登记 ----------
         auto tcp_server = std::make_shared<CServer>(io_context, atoi(port_str.c_str()));
         shutdown.SetTcpServer(tcp_server);            // noexcept（方案 B 强引用）
 
-        // ---- 阶段 7：Session Directory 注册 -------------------------------
-        LogicSystem::GetInstance()->SetMeetingSessionDirectory(tcp_server);
-        shutdown.SetLogicSystem(LogicSystem::GetInstance().get());
+        // ---- 阶段 7：LogicSystem 指针登记 → 之后才注册目录 -----------------
+        // 顺序（M6.0.6 修正）：**先**取得并登记 LogicSystem，**再**注册目录。
+        // 理由：Cleanup 的步骤 2（ShutdownWorkExecutor）与步骤 3（ClearMeetingSessionDirectory）
+        //       都以 logic_ 为前提；若把 LogicSystem 的获取/登记放在目录注册之后，
+        //       那么在"LogicSystem::GetInstance() 抛异常"或"后续某步抛异常"时，
+        //       协调器会因为 logic_ 仍为空而**跳过** exec/目录清理。
+        // 注：SetMeetingSessionDirectory 本身声明为 noexcept（§12.3.5.3），
+        //     因此"注册目录抛异常"这一路径在设计上不存在；此处顺序修正针对的是
+        //     **LogicSystem 获取失败**与**将来接口变化**两种情形。
+        LogicSystem* logic = LogicSystem::GetInstance().get();   // 可能抛
+        shutdown.SetLogicSystem(logic);                          // noexcept：立即登记
+        logic->SetMeetingSessionDirectory(tcp_server);            // noexcept（契约）
 
         // ---- 阶段 8：信号回调（只唤醒；不做任何清理）----------------------
         signals.async_wait([&io_context](auto, auto) { io_context.stop(); });
@@ -1709,18 +1815,24 @@ int main()
 ```
 
 ```text
-与 M6.0.4 的差异（本轮修正）：
-  · M6.0.4 先 GetInstance(pool) / GetInstance(redis) / BuildAndStart，
-    再构造协调器 ⇒ 从"pool 线程启动"到"协调器建立"之间出现无主窗口。
-  · M6.0.5 把协调器提到**阶段 1**（任何 GetInstance 之前），
-    之后每取得一项资源立即以 noexcept setter 登记 ⇒ 窗口消除（§12.3.5.3）。
-  · grpc_server 改为 shared_ptr：使协调器在兜底 Cleanup 时仍能调用 Shutdown()，
-    而不依赖 main 局部 unique_ptr 的存活。
+与 M6.0.5 的差异（M6.0.6 修正，共四处）：
+  · gRPC Server 所有权：shared_ptr 改为 **unique_ptr 独占 + noexcept 移动**。
+    原因：从裸指针构造 shared_ptr 要分配控制块（可能抛），而 BuildAndStart()
+    返回时 gRPC 已在服务 ⇒ "setter noexcept" 无法证明"交接无异常窗口"。
+  · BuildAndStart() 返回 nullptr ⇒ **视为初始化失败并抛异常**（不再"登记空指针然后继续"）。
+    这是对 R-17 的最小范围调整，见 §12.3.13 D-4。
+  · 阶段 7 顺序：**先登记 LogicSystem，再注册目录**（此前相反）。
+  · ShutdownCoordinator 构造函数**去掉 noexcept**（拷贝 std::string 可能抛）。
+
+与 M6.0.4 的差异（历史）：
+  M6.0.4 先 GetInstance(pool/redis)/BuildAndStart 再构造协调器 ⇒ 无主窗口；
+  M6.0.5 把协调器提到阶段 1（任何 GetInstance 之前）并逐项 noexcept 登记。
 ```
 
 ```text
 命名契约（B1）：
-  grpc_server        : std::shared_ptr<grpc::Server>（登记进协调器）；关闭 = grpc_server->Shutdown()
+  grpc_server        : std::unique_ptr<grpc::Server>，所有权**转移**给协调器（noexcept 移动）；
+                       关闭 = 协调器步骤 1a 调 Shutdown()
   tcp_server         : std::shared_ptr<CServer>；**没有** Shutdown()；关闭 = 停 io_context/pool、
                        清 _sessions 后析构
   grpc_server_thread : 协调器按值持有的 std::thread，运行 grpc_server->Wait()；步骤 5 join
@@ -1736,6 +1848,7 @@ int main()
 | 正常 | 返回 | 是 | 全部 | `run()` 后**显式** `Cleanup()` | fail-stop |
 | 信号 | `stop()` ⇒ 返回 | 是 | 全部 | 同上 | fail-stop |
 | **`run()` 抛异常** | 否 | 是 | 全部 | 内层 `catch(...)` **先显式** `Cleanup()` 再 `throw` | fail-stop |
+| **`BuildAndStart()` 返回 nullptr** | 未进入 | 否 | pool/redis | 协调器：**主动抛** `std::runtime_error` ⇒ 析构兜底清理 | fail-stop（若 1b/4b 失败） |
 | **阶段 0–8 任一抛异常**（run 尚未进入） | 未开始 | **否**（阶段 9 未到） | 截至该点已登记者 | 协调器析构兜底 `Cleanup()` | fail-stop（若该路径的 1b/4b 失败） |
 | **阶段 9 `StartGrpcThread()` 抛** | 未开始 | 否（线程未启动） | 全部 | 协调器析构兜底 `Cleanup()` | 同上 |
 | **`GetInstance()` 自身抛（类 A）** | 未开始 | 否 | 该项未登记 | **无人**（对象未诞生）⇒ 见 §12.3.12.3 | 不可达；M6 不声称覆盖 |
@@ -1747,9 +1860,9 @@ int main()
 
 | 问题 | 答案 | 依据 |
 | --- | --- | --- |
-| ① `grpc_server` / `tcp_server` 构造、拥有、析构 | 两者都是 `shared_ptr`，且**都由协调器持强引用**（`SetGrpcServer` / `SetTcpServer`）。局部 shared_ptr 先析构只降计数，对象在协调器 `Cleanup()` 期间仍存活；`tcp_server` 最终在**协调器析构体内**销毁，而 `io_context` 声明在协调器之前 ⇒ 比协调器晚析构 ⇒ 满足 `CServer` 对 `io_context&` 的依赖 | §12.3.6.1 / §12.3.6.2 |
+| ① `grpc_server` / `tcp_server` 构造、拥有、析构 | **形态不同（M6.0.6）**：`grpc_server` 由协调器**独占** `unique_ptr`（阶段 5 经 noexcept 移动转移，main 不留局部持有者）；`tcp_server` 由协调器持 `shared_ptr` **强引用**（方案 B），main 局部也持一份。两者在协调器 `Cleanup()` 期间都必然存活；`tcp_server` 最终在**协调器析构体内**销毁，而 `io_context` 声明在协调器之前 ⇒ 比协调器晚析构 ⇒ 满足 `CServer` 对 `io_context&` 的依赖 | §12.3.6.1 / §12.3.6.2 / §12.3.8.1 |
 | ② `grpc_server_thread` 启停/join | `StartGrpcThread()` 在**阶段 9** 启动（所有可失败初始化之后）；协调器**按值**持有；步骤 5 join；若该调用抛异常，线程仍非 joinable | §12.3.5.2 / §12.3.6.2 |
-| ③ 协调器何时建立、如何覆盖已启动线程 | **阶段 1**，即 `GetInstance(pool)` / `GetInstance(redis)` / `BuildAndStart` **之前**；以**空依赖**构造，随后每取得一项资源立即 noexcept 登记 ⇒ 从"第一个后台线程启动"起就有清理责任归属（类 A 除外，见 §12.3.12.3） | §12.3.5.2 / §12.3.5.3 / §12.3.6.2 |
+| ③ 协调器何时建立、如何覆盖已启动线程 | **阶段 1**，即 `GetInstance(pool)` / `GetInstance(redis)` / `BuildAndStart` **之前**；以**空依赖**构造（构造函数**不加 noexcept**），随后每取得一项资源立即 noexcept 登记 ⇒ 从"第一个后台线程启动"起就有清理责任归属。**例外**：类 A 的 A-ii / A-iii 在协调器获得运行机会之前就 terminate（§12.3.12.3） | §12.3.5.2 / §12.3.5.3 / §12.3.12.3 |
 | ④ 路径差异 | 正常/信号/`run()` 抛异常三条**显式** `Cleanup()`；阶段 0–9 的初始化失败由**析构兜底**；`GetInstance()` 自身失败为类 A（未覆盖）。K 级失败一律 fail-stop | §12.3.7 / §12.3.12 |
 | ⑤ gRPC 与网络生产者何时停 | 步骤 1a / 1b，均早于 drain | §12.3.5.2 |
 | ⑥ `pool->Stop()` 为何恰好一次 | 唯一调用点在 `Cleanup()`；`done_` 闸门；信号回调不调用；**失败不重试而是 fail-stop** | §12.3.5.1 |
@@ -1763,12 +1876,15 @@ int main()
 #### 12.3.8.1 所有权与析构证明（M6.0.5：协调器前置 + 全强引用）
 
 ```text
-强引用关系（分阶段）：
+所有权关系（分阶段，M6.0.6 修正 grpc_server 为独占）：
   ┌ 协调器在**阶段 1** 构造，此时 pool_/redis_/grpc_server_/tcp_server_ 均为空；
-  ├ 每取得一项资源 → 立即 noexcept 登记（§12.3.5.3）⇒ 登记之后协调器持强引用；
-  ├ 局部 shared_ptr（pool/redis/grpc_server/tcp_server）在 main 作用域结束前析构时
+  ├ 每取得一项资源 → 立即 noexcept 登记（§12.3.5.3）：
+  │    · pool / redis / tcp_server : shared_ptr **共享**强引用（局部也持一份）
+  │    · grpc_server               : unique_ptr **独占**（局部只是转移前的临时持有者）
+  ├ 局部 shared_ptr（pool/redis/tcp_server）在 main 作用域结束前析构时
   │  只降低引用计数，对象因协调器仍持有而**存活**；
-  └ 协调器析构 → Cleanup()（此时上述对象全部存活）→ 成员逆序释放 ⇒ 最后一个强引用才归零。
+  ├ grpc_server 在阶段 5 完成 noexcept 移动之后，**只有**协调器持有它；
+  └ 协调器析构 → Cleanup()（此时上述对象全部存活）→ 成员逆序释放 ⇒ 对象销毁。
 ```
 
 **逐路径析构顺序**：
@@ -1777,16 +1893,16 @@ int main()
 | --- | --- | --- | --- |
 | 正常（`run()` 返回） | 是（局部 + 协调器双持有） | 是（清理已 done_，成员随后释放） | 协调器成员析构期 |
 | `run()` 抛异常 | 是（内层 catch 时局部仍在作用域） | 是 | 同上 |
-| 阶段 5–9 初始化抛 | 不适用（显式 Cleanup 未调用） | **是**（已登记的项由协调器持有） | 同上 |
+| 阶段 5–9 初始化抛 | 不适用（显式 Cleanup 未调用） | **是**（已登记的项由协调器持有；grpc_server 已独占） | 同上 |
 | 阶段 2/3 `GetInstance()` 抛（类 A） | 不适用 | 该项从未登记（对象未诞生） | **不适用**（M6 不覆盖） |
 
 **`io_context` 与 `tcp_server` 的顺序论证（M6.0.5 重排后）**：
 
 ```text
-声明顺序 : io_context → signals → service → shutdown → pool → redis
-           → grpc_server → tcp_server(局部)
-析构顺序 : tcp_server(局部) → grpc_server(局部) → redis(局部) → pool(局部)
-           → shutdown → service → signals → io_context
+声明顺序 : io_context → signals → service → shutdown → pool → redis → tcp_server(局部)
+析构顺序 : tcp_server(局部) → redis(局部) → pool(局部) → shutdown → service → signals
+           → io_context
+           （grpc_server 在 shutdown 析构体内销毁）
 关键点：
   · shutdown 声明在 io_context **之后** ⇒ shutdown **早于** io_context 析构；
   · tcp_server 对象最终在 shutdown 析构体内才被销毁（协调器持最后一个强引用）
@@ -1887,14 +2003,16 @@ done_ 的语义（B1 第 4 项）：
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | F0 | 阶段 0（io_context/signals/service 构造） | **无** | 部分 | 无（无资源需清理） | 否 | 否 | 否 | 不适用 | **否**（无线程） |
 | F1 | 阶段 1 协调器构造 | 无 | 无 | 无 | 否 | 否 | 否 | 不适用 | **否** |
-| F2 | 阶段 2 `AsioIOServicePool::GetInstance()` **抛** | 构造期已部分启动（见 A-1） | 无（未返回） | **无人**（类 A） | 无法（无句柄） | 否 | 否 | 不可达 | **是 —— 既有缺陷，未覆盖** |
+| F2 | 阶段 2 `AsioIOServicePool::GetInstance()` **抛** —— 按 **A-1-i / A-1-ii / A-1-iii** 三分（见 §12.3.12.3） | A-1-i：无；A-1-ii：**部分**；A-1-iii：**全部** | 无（未返回） | **无人**（类 A，协调器**从未获得运行机会**） | 无法（无句柄） | 否 | 否 | 不可达 | A-1-i：**否**；A-1-ii / A-1-iii：**是 ⇒ terminate** |
 | F3 | 阶段 2 返回后、`SetPool` 期间 | pool 线程已运行 | pool 已返回 | 协调器（登记为 noexcept，必完成） | **是** | 视 redis_ 是否已登记（此时否） | 否 | 1b 失败 ⇒ fail-stop | **否** |
-| F4 | 阶段 3 `RedisMgr::GetInstance()` **抛** | pool 线程 +（可能）check_thread_ 构造期部分（A-2） | pool 已登记 | 协调器清理 pool；Redis **无人**（类 A） | **是** | 无法（无句柄） | 否 | 1b 失败 ⇒ fail-stop | pool：否；Redis：**是（未覆盖）** |
+| F4 | 阶段 3 `RedisMgr::GetInstance()` **抛** —— 按 **A-2-i / A-2-ii / A-2-iii** 三分（见 §12.3.12.3） | pool 线程**已运行**；Redis：A-2-i 无 / A-2-ii **部分** / A-2-iii **全部** | pool 已登记 | **A-2-i**：协调器可清理 pool（无 Redis 线程）<br>**A-2-ii / A-2-iii**：**无人** —— 在 Redis 单例的 shared_ptr 构造失败/析构路径上即 terminate，协调器**没有机会运行** | **是**（pool） | 无法（无句柄） | 否 | A-2-i：1b 失败 ⇒ fail-stop；A-2-ii/iii：不可达 | A-2-i：**否**；A-2-ii / A-2-iii：**是 ⇒ terminate（pool 可能也被拖入 terminate）** |
 | F5 | 阶段 4 `HSet` 抛异常 | pool 线程 + check_thread_ **均在运行** | pool、redis 均已登记 | 协调器（析构兜底） | **是** | **是** | 否 | 1b/4b 失败 ⇒ fail-stop | **否** |
 | F6 | 阶段 5 `BuildAndStart()` 抛 | 同上 | 同上 | 协调器 | 是 | 是 | 未登记 ⇒ 跳过（gRPC 自行清理其内部） | 1b/4b ⇒ fail-stop | **否** |
-| F7 | 阶段 5 返回 nullptr | 同上 | 同上 | 协调器（登记空指针安全） | 是 | 是 | 空指针 ⇒ 跳过 | 同上 | **否**（R-17 既有缺陷） |
+| F7 | 阶段 5 返回 **nullptr** | 同上 | 同上 | 协调器：**主动抛 `std::runtime_error`** ⇒ 已登记的 pool/redis 由析构兜底清理 | 是 | 是 | 无 Server 可停 ⇒ 跳过 | 1b/4b ⇒ fail-stop | **否**（M6.0.6 起视为初始化失败，见 D-4 / R-17） |
+| F7b | 阶段 5(b)(c) unique_ptr 构造 / 移动 | 同上 | 同上 | 不可达（两步均 noexcept 且不分配内存） | — | — | — | 不可达 | **否**（交接窗口为零，§12.3.5.3） |
 | F8 | 阶段 6 `make_shared<CServer>` 抛 | 同上 + gRPC 已开始服务 | 同上 + grpc_server 已登记 | 协调器 | 是 | 是 | **是**（1a 停 handler） | 1a/1b/4b ⇒ fail-stop | **否** |
-| F9 | 阶段 7 目录注册抛 | 同上 | 同上 + tcp_server 已登记 | 协调器（1b→2 可 drain，目录可达） | 是 | 是 | 是 | 2 失败 ⇒ fail-stop | **否** |
+| F9 | 阶段 7a `LogicSystem::GetInstance()` **抛** | 同上 | pool/redis/grpc_server/tcp_server 均已登记，logic **未登记** | 协调器（1a/1b/4b/5 仍可执行；2/3 因 logic_ 为空而跳过） | 是 | 是 | 是 | 1a/1b/4b/5 失败 ⇒ fail-stop | **否**（executor 从未创建 ⇒ worker_ 不存在） |
+| F9b | 阶段 7b `SetMeetingSessionDirectory()` | 同上 | 同上 + logic 已登记 | **不可抛**：该 API 契约为 noexcept（§12.3.5.3），因此**不设异常注入用例** | — | — | — | 不可达 | **否** |
 | F10 | 阶段 8/9 之间（含 `StartGrpcThread` 抛） | 同上（gRPC Wait 线程未启动或已启动） | 同上 | 协调器 | 是 | 是 | 是 | 5 失败 ⇒ fail-stop | **否** |
 | F11 | 阶段 10 `io_context.run()` 抛 | 同上 + gRPC Wait 线程 | 全部 | **内层 catch 显式 Cleanup** 后 rethrow | 是 | 是 | 是 | 任一 K 级 ⇒ fail-stop | **否** |
 | F12 | 阶段 10 正常返回 | 同上 | 全部 | **显式 Cleanup** | 是 | 是 | 是 | 同上 | **否** |
@@ -1902,34 +2020,80 @@ done_ 的语义（B1 第 4 项）：
 ```text
 关键结论：
   · 类 B 的每个失败点（F3–F12）都有明确清理责任，且由"立即 noexcept 登记"保证登记必完成。
-  · 正常析构时**不会**仍有 joinable thread 的唯一例外是 F2 / F4 的 Redis 部分（类 A）。
+  · 类 A 中只有 **A-1-i / A-2-i**（线程尚未启动就抛）是安全的（无线程 ⇒ 无 terminate）；
+    **A-1-ii / A-1-iii / A-2-ii / A-2-iii** 会在协调器获得运行机会之前就 terminate
+    ⇒ **不能**报告为"已受协调器保护"，也不计入 PASS。
   · fail-stop 覆盖的是"K 级清理步骤失败"，与"某步骤从未被调用"是两件事。
+  · F7 已从"登记空指针继续"改为"主动抛初始化异常"（M6.0.6，见 D-4）。
 ```
 
-##### 12.3.12.3 类 A（单例构造期）为何无法由协调器覆盖 —— 如实声明
+##### 12.3.12.3 类 A 的四种情形（必须分开，不得合并成一句"既有缺陷"）
+
+类 A 指"单例尚未成功返回"的失败。**它不是一件事，而是四种，后果完全不同。**
+
+| 代号 | 情形 | 后台线程状态 | 是否 terminate | 协调器是否获得运行机会 |
+| --- | --- | --- | --- | --- |
+| **A-i** | 构造期、**任何线程启动之前**抛 | 无 | **否** | 否（也不需要） |
+| **A-ii** | **部分线程已启动**后，后续 `std::thread` 构造失败 | **部分**（已启动者仍 joinable） | **是** | **否** |
+| **A-iii** | 对象**构造完成**，但 `shared_ptr` **控制块分配**失败 | **全部** | **是** | **否** |
+| **A-iv** | 单例**成功返回并已登记**，后续初始化抛 | 全部 | 否（协调器覆盖） | **是** |
+
+> **关键区分**：A-i ~ A-iii 属于"类 A"，A-iv 属于"类 B"。
+> A-iv 是 M6 设计覆盖的部分；A-i ~ A-iii **不是**，且 A-ii / A-iii
+> **在协调器获得运行机会之前就已 terminate**，因此**不得**报告为"已受协调器保护"。
+
+###### A-1（`AsioIOServicePool`，`AsioIOServicePool.cpp:3-16` 构造；`:18-21` 析构）
 
 ```text
-A-1 AsioIOServicePool（AsioIOServicePool.cpp:3-16 构造；:18-21 析构）
-    构造顺序：_works 逐个 make_unique<Work> → 再 for 循环 emplace_back(std::thread)。
-    若 std::thread 构造在循环中途抛（资源耗尽）：
-      · 构造函数抛 ⇒ 对象未诞生 ⇒ 其析构**不会**被调用；
-      · 已成功构造的 std::thread 仍为 joinable，随 _threads 成员销毁 ⇒ **std::terminate**。
-    即便构造函数正常结束、仅控制块分配失败（shared_ptr 内部 delete）：
-      · ~AsioIOServicePool() **不调用 Stop()**（源码中 `//Stop();` 被注释掉）
-      · ⇒ _threads 仍 joinable ⇒ **std::terminate**。
-    ⇒ 该类失败**不可**在 M6 内修复：唯一修法是修改 GBK 编码的 AsioIOServicePool.*
-      （禁止），或改用不同的单例获取方式（会改变既有启动语义）。
-    ⇒ M6 **不声称**覆盖 A-1。
+构造顺序：_works 逐个 make_unique<Work>  →  再 for 循环 _threads.emplace_back(std::thread)。
 
-A-2 RedisMgr / RedisConPool（RedisMgr.h:14-50 构造；:52-54 析构为空）
-    check_thread_ 在构造函数**末尾**启动。
-      · 若在其之前抛 ⇒ 无线程启动，无残留；
-      · 若在其之后（构造已近完成）仅 shared_ptr 控制块分配失败 ⇒ 对象被 delete
-        ⇒ ~RedisConPool() 为空 ⇒ check_thread_ 仍 joinable ⇒ **std::terminate**。
-    ⇒ 同样是既有构造期缺陷；M6 **不声称**覆盖 A-2。
+A-1-i  在第一个 std::thread 构造之前抛（如 work guard 分配失败）
+       ⇒ 无线程 ⇒ 无 joinable ⇒ 安全退出；协调器无需介入。
+A-1-ii std::thread 构造在循环中途抛（资源耗尽）
+       ⇒ 构造函数抛 ⇒ 对象未诞生 ⇒ **~AsioIOServicePool() 不被调用**
+       ⇒ 已构造的 std::thread 随 _threads 成员销毁 ⇒ **std::terminate**。
+       ⇒ 协调器**根本没有运行机会**。
+A-1-iii 构造函数正常结束，但 `std::shared_ptr<T>(new T)` 的**控制块分配失败**
+       ⇒ 标准要求对裸指针调用 delete ⇒ `~AsioIOServicePool()` 运行
+       ⇒ 该析构**不调用 Stop()**（源码 `//Stop();` 被注释掉）
+       ⇒ `_threads` 仍 joinable ⇒ **std::terminate**。
+       ⇒ 协调器**没有运行机会**。
+```
 
-补充：`RedisConPool` 构造中 `redisConnect` 失败会 `continue`，`reply->type` 未判空
-      （RedisMgr.h:29）—— 潜在空指针解引用。属既有缺陷，M6 不修，仅登记（R-19）。
+###### A-2（`RedisMgr` / `RedisConPool`，`RedisMgr.h:14-50` 构造；`:52-54` 析构为空）
+
+```text
+构造顺序：redisConnect/AUTH 循环 → 末尾启动 check_thread_。
+
+A-2-i  在 check_thread_ 启动之前抛（如连接阶段异常）
+       ⇒ 无线程 ⇒ 安全；此时 pool 已登记，协调器仍能清理 pool。
+A-2-ii check_thread_ 启动之后、构造函数仍有可抛操作（理论窗口）
+       ⇒ 对象未诞生 ⇒ ~RedisConPool() 不被调用 ⇒ check_thread_ joinable
+       ⇒ **std::terminate**；协调器无运行机会。
+       （当前源码在线程启动后没有其它可抛语句，因此该窗口极窄甚至不存在；
+         但**不得**因此宣称"绝不可能"—— 依赖当前源码文本，而非语言保证。）
+A-2-iii 构造完成，但 RedisMgr 的 shared_ptr 控制块分配失败
+       ⇒ delete 对象 ⇒ ~RedisMgr() / ~RedisConPool() 均为空/不 join
+       ⇒ check_thread_ joinable ⇒ **std::terminate**；协调器无运行机会。
+```
+
+###### 为什么不能在 M6 内修复 A-i ~ A-iii
+
+```text
+· 唯一有效的修法是在 AsioIOServicePool 的析构/构造函数里 join 线程，
+  但那需要修改 **GBK 编码**的 AsioIOServicePool.*（本轮明确禁止）。
+· 或者改变单例获取方式（例如全局对象、或提前 Stop），
+  那会改变既有启动语义与静态析构顺序，超出 M6 授权范围。
+⇒ M6 **如实登记为不覆盖**，并**不**把 A-ii / A-iii 计入任何 PASS 结论。
+```
+
+###### 补充：`RedisConPool` 的另一个构造期缺陷（R-19）
+
+```text
+RedisMgr.h:29 → auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
+               if (reply->type == REDIS_REPLY_ERROR) { ... }
+未检查 reply 是否为 nullptr ⇒ 可能空指针解引用。
+属既有缺陷、且位于**构造期**（类 A），M6 不修改 RedisMgr.h，仅登记（R-19）。
 ```
 
 ##### 12.3.12.4 与 gRPC 相关的两个边界
@@ -1953,6 +2117,27 @@ D-1 gRPC 的**服务可用时间**由 `BuildAndStart()` 决定，与 `Wait()` �
 D-2 信号回调不再直接 Shutdown gRPC（改由协调器步骤 1a）
 D-3 Redis 关闭仍先于 grpc_thread_.join()
     但**不再声称**它与 gRPC handler 并发（见 §12.3.14：1a 已阻塞到 handler 完成）
+D-4 `BuildAndStart()` 返回 nullptr 的处理由"登记空指针后继续"改为
+    "**视为初始化失败并主动抛出** `std::runtime_error`"（M6.0.6）。
+    这是对原 R-17"完全不修"裁决的**最小范围调整**，理由与影响见下方说明。
+```
+
+###### D-4 说明：为什么这是必要的，以及为什么范围最小
+
+```text
+原裁决（R-17）：`BuildAndStart()` 可能返回 nullptr，属既有缺陷，M6 不修，
+                目标代码用"登记空指针 + Cleanup 空指针检查"绕开。
+问题：该做法会让进程在**没有 gRPC 服务**的状态下继续启动 TCP 服务与 work executor，
+      即"部分启动成功" —— 一个静默的降级状态。而 M6.0.5 之后协调器已经能可靠地
+      清理已登记资源，因此"发现失败就干净退出"是可实现的、也更诚实的选择。
+
+最小范围调整（本轮明确记录）：
+  · 只增加一个 `if (raw == nullptr) throw std::runtime_error(...)`；
+  · **不**改变 BuildAndStart 的调用方式、**不**引入重试、**不**修改 gRPC 相关代码；
+  · 清理责任仍由协调器承担（pool/redis 已登记，gRPC 无对象可停 ⇒ 步骤 1a 跳过）；
+  · 因此 R-17 的性质从"完全不修（行为不变）"变为
+    "**不修复其成因，但把后果从静默降级改为显式启动失败**"。
+  · R-17 仍然**不是**"已修复"：根因（gRPC 可能启动失败）依旧存在。
 ```
 
 #### 12.3.14 R-18 的重新裁决（B3）：删除"handler 并发访问 Redis"的断言
@@ -2659,15 +2844,21 @@ M6.0.3 改为"协调器先于 tcp_server、线程最后启动"；
   代价是失去优雅关闭。本风险**仍然存在**，只是不再有机会演化为静默的 use-after-free。
 ```
 
-### R-17：`BuildAndStart()` 可能返回空指针（既有，M6 不扩大范围修正）
+### R-17：`BuildAndStart()` 可能返回空指针（成因不修；M6.0.6 起后果改为显式失败）
 
 ```text
 事实：现状 `std::unique_ptr<grpc::Server> server(builder.BuildAndStart());`
       之后立即 `server->Wait()`；若返回 nullptr 则解引用空指针。
-性质：既有缺陷，与 M6 无关；M6 的协调器只接受 `grpc::Server*`，
-      因此**不会**改变该行为。
-处置：如实登记；若 Coding 时决定顺手加 null 检查，须作为**授权范围内的极小改动**
-      单独记录（不得借机扩大 M6 范围）。
+成因：**未修复**（M6 不改变 gRPC 的启动方式，也不改变 BuildAndStart 的行为）。
+
+M6.0.6 的最小范围调整（后果层面）：
+  · 目标代码在**取到裸指针后立即判空**；若为空 ⇒ 抛 std::runtime_error
+    ⇒ 进程以"启动失败"退出，而不是带着没有 gRPC 服务的半启动状态继续。
+  · 清理责任：pool/redis 已登记 ⇒ 协调器析构兜底清理；
+    gRPC 无对象 ⇒ 步骤 1a 跳过；因此异常路径不会泄漏线程。
+  · 仍未修复的部分：为什么 BuildAndStart 会失败（端口占用、配置错误等）
+    依然只以异常形式暴露，M6 不提供更细的诊断或重试。
+⇒ 性质：**根因未修、后果显式化**。不得表述为"R-17 已修复"。
 ```
 
 ### R-18：Redis 关闭的并发性 —— **已重新裁决**（M6.0.3 / B3）
@@ -2903,6 +3094,29 @@ fail-stop 是本设计对"不可恢复的关闭失败"的**明确策略**，不�
 **Phase 1 仍然完全冻结**：E1–E3 同样是文档内部一致性与实现可行性修正，
 没有修改、豁免或放宽 Phase 1 的任何条款。
 
+### 19.10 M6.0.6 追加的裁决
+
+| 项 | M6.0.5 的问题 | M6.0.6 裁决 | 依据 |
+| --- | --- | --- | --- |
+| F1 gRPC 交接窗口 | `shared_ptr<grpc::Server>(raw)` 需分配控制块（可抛），而 BuildAndStart 已开始服务；"setter noexcept" 不能证明交接不抛 | 协调器改为**独占 `std::unique_ptr<grpc::Server>`**，经 `SetGrpcServer(unique_ptr) noexcept` **移动**转移；raw→unique_ptr 构造与移动**都不分配内存** | §12.3.5.2 / §12.3.5.3 |
+| F2 LogicSystem 登记顺序 | 先注册目录、后登记 LogicSystem ⇒ logic_ 可能为空而跳过步骤 2/3 | **先 `SetLogicSystem`，再 `SetMeetingSessionDirectory`**；并明确后者为 **noexcept 契约** | §12.3.6.2 阶段 7 |
+| F3 类 A 未拆分 | F4 把 Redis 构造期失败统一说成"协调器清理 pool" | 拆为 **A-i**（线程前抛，安全）/ **A-ii**（部分线程后抛，terminate）/ **A-iii**（控制块分配失败，terminate）/ **A-iv**（已登记后失败，协调器覆盖）；A-ii/iii **不得**计入 PASS | §12.3.12.3 |
+| F4 nullptr 处理 | 目标代码登记空指针继续，与"R-17 不修"并存且行为不同 | 判空即**抛 `std::runtime_error`**；R-17 重新表述为"**根因未修、后果显式化**"的**最小范围调整**（仅加一处判空） | §12.3.13 D-4 / §18 R-17 |
+| F5 构造函数异常规格 | `noexcept` 但内部拷贝 `std::string`（可抛） | **去掉 noexcept**；说明构造发生在阶段 1（无线程、无已登记资源），抛出安全 | §12.3.5.2 |
+| F6 元数据 | §24.3 把 8653a69 写成当前远端 | 改为"历史基线清单"，当前远端一律按动态 Git 规则判定 | §24.2 / §24.3 |
+
+**关于 F4 的范围声明（必须保留）**：
+
+```text
+F4 是本项目对一条既有裁决（R-17"完全不修"）的**最小范围调整**，因此必须显式记录：
+  · 只新增一处 `if (raw == nullptr) throw ...`；
+  · 不改变 BuildAndStart 的调用方式、不引入重试、不提供更细的诊断；
+  · R-17 的**根因仍然存在**，不得表述为"已修复"。
+```
+
+**Phase 1 仍然完全冻结**：F1–F6 同样是文档内部一致性与实现可行性修正，
+没有修改、豁免或放宽 Phase 1 的任何条款。
+
 **Phase 1 仍然完全冻结**：以上五项均为文档内部一致性与实现可行性修正，
 **没有**修改、豁免或放宽 Phase 1 的任何条款。
 
@@ -2988,14 +3202,18 @@ A21  构造/启动顺序与目标代码逐项一致（§12.3.6.2），且该顺�
        阶段 2  pool = GetInstance()   → SetPool()       ← 构造即启动 _threads
        阶段 3  redis = GetInstance()  → SetRedis()      ← 构造即启动 check_thread_
        阶段 4  redis->HSet(...)
-       阶段 5  grpc_server = BuildAndStart() → SetGrpcServer()
+       阶段 5  raw = BuildAndStart() → 判空（空 ⇒ 抛）→ unique_ptr(raw) → SetGrpcServer(move)
        阶段 6  tcp_server = make_shared<CServer>() → SetTcpServer()
-       阶段 7  SetMeetingSessionDirectory()
+       阶段 7  a) logic = LogicSystem::GetInstance().get() → SetLogicSystem(logic)
+               b) logic->SetMeetingSessionDirectory(tcp_server)   （noexcept 契约）
        阶段 8  signals.async_wait(...)                  （只唤醒，不清理）
        阶段 9  StartGrpcThread()                        ← 最后启动
        阶段 10 io_context.run()；异常路径先显式 Cleanup() 再 rethrow
      异常安全意义：阶段 1 早于阶段 2/3 ⇒ 后台线程一启动就已有责任归属；
                    阶段 2/3 的 GetInstance 返回后紧跟 noexcept 登记 ⇒ 无异常窗口；
+                   阶段 5 的 (raw → unique_ptr → move) 三步**均 noexcept 且不分配内存**
+                   ⇒ gRPC 交接无异常窗口（§12.3.5.3）；
+                   **LogicSystem 必须先于目录注册登记**（否则 logic_ 为空会跳过步骤 2/3）；
                    阶段 9 最后 ⇒ 不存在"gRPC Wait 线程已启动但无人 join"的窗口。
      **不得**再把顺序表述为"协调器在 gRPC 线程启动之后建立"（M6.0.1）
      或"协调器在 tcp_server 之前、pool/Redis 之后建立"（M6.0.3）——
@@ -3006,16 +3224,21 @@ A22  清理步骤按级别使用两个包装，且**不存在**名为 Step() 的
        · BestEffort() —— B 级非关键步骤（3/4a）；失败时记录非致命诊断并继续
      Cleanup() 正常返回 ⇒ 五个 K 级步骤**均已成功完成**；
      fail-stop 路径**不返回**（进程终止），因此不存在"返回了但其实关键步骤失败"的状态。
-     所有步骤**均做空指针检查**：未登记的资源（如 BuildAndStart 未成功、pool 未取得）
+     所有步骤**均做空指针检查**：未登记的资源（如 pool 未取得、logic 未登记）
      被安全跳过，因此"协调器先建、资源后登记"不会产生空指针解引用。
+     注：`BuildAndStart()` 返回 nullptr 时**不再**走到"空指针跳过" ——
+     M6.0.6 起在阶段 5 就主动抛异常，Cleanup 只因步骤 1a 找不到 Server 而跳过（§12.3.13 D-4）。
+     全部 setter 的 noexcept 依据见 §12.3.5.3 的表（含 unique_ptr 移动）。
      **不得**把"所有步骤都被 try/catch 包裹"误写成"所有异常都能安全恢复"：
      关键步骤的异常是**不可恢复**的，靠终止进程而非恢复流程来保证安全
      （§12.3.5.1 / §12.3.5.2 / §12.3.9）
-A23  `tcp_server` 所有权 = **方案 B**：协调器成员类型为 `std::shared_ptr<CServer> tcp_server_`，
-     `SetTcpServer()` 接收 `std::shared_ptr<CServer>` 且为 **noexcept**（**不是**非拥有裸指针；
-     LogicSystem 仍只持 weak_ptr）。同理 `grpc_server_` 也改为强引用
-     （`std::shared_ptr<grpc::Server>`，`SetGrpcServer()` noexcept），
-     以保证兜底 Cleanup 时仍可调用 `Shutdown()`。
+A23  所有权形态（M6.0.6 修正）：
+       · `tcp_server_` : `std::shared_ptr<CServer>`，`SetTcpServer(shared_ptr)` **noexcept**
+                         （方案 B 强引用；LogicSystem 仍只持 weak_ptr）
+       · `grpc_server_` : **`std::unique_ptr<grpc::Server>`（独占）**，
+                          `SetGrpcServer(unique_ptr)` **noexcept 移动**
+                         ——**不是** shared_ptr：从裸指针构造 shared_ptr 需分配控制块，
+                         而 BuildAndStart 返回时 gRPC 已在服务（§12.3.5.3）
      生命周期论证按阶段成立（§12.3.8.1）：
        · `tcp_server` 构造成功并 `SetTcpServer()` **之前**：成员为空，协调器不持有任何 TCP Server；
          此时若构造失败，**目录尚未注册、gRPC 线程尚未启动**，不得声称"某个 TCP Server 仍存活"
@@ -3033,7 +3256,8 @@ A26  清理步骤已分级：1a/1b/2/4b/5 为 K 级（失败 fail-stop），3/4a
 A27  强引用论证必须是**分阶段**的，不得过度声称：
        · `SetXxx()` 之前：对应成员为空、协调器不持有该对象（此阶段失败时不得声称它仍存活）
        · `SetXxx()` 之后：协调器持强引用，`Cleanup()` 执行期间保持其存活
-       适用于 pool_ / redis_ / grpc_server_ / tcp_server_ 四项
+       适用于 pool_ / redis_ / tcp_server_（shared_ptr 强引用）与
+       grpc_server_（unique_ptr 独占，SetGrpcServer 之后转移完成）
      全文不得出现"tcp_server 的生产期覆盖协调器从构造到析构全过程"这类表述
      （协调器在阶段 1 就存在，早于上述全部对象）（§12.3.8.1）
 A28  不对 `pool->Stop()` / `RedisMgr::Close()` 做任何重试；
@@ -3063,9 +3287,13 @@ B15  关闭路径幂等性：OR4 通过；且 AsioIOServicePool::Stop() 在整�
 B16  run() 异常路径清理：注入一个抛异常的 handler，断言 pool 已停、worker 已 join、
      tcp_server 尚未析构（可用可观测计数/日志顺序断言）
 B17  gRPC 线程必被 join：分别注入（a）HSet 抛异常、（b）BuildAndStart 抛异常、
-     （c）tcp_server 构造抛异常、（d）目录注册抛异常、（e）run() 抛异常，
-     五种情况断言进程**未** std::terminate、pool 线程与 Redis check_thread_ 均被 join、
-     且清理日志齐全（这五种都属于**类 B**：对应单例已成功返回）
+     （c）**BuildAndStart 返回 nullptr**（应观测到 runtime_error 且 pool/redis 被清理）、
+     （d）tcp_server 构造抛异常、（e）**LogicSystem::GetInstance() 抛异常**
+     （应观测到 Cleanup 因 logic_ 为空而跳过步骤 2/3，但 1a/1b/4b/5 仍执行）、
+     （f）run() 抛异常，
+     六种情况断言进程**未** std::terminate、pool 线程与 Redis check_thread_ 均被 join、
+     且清理日志齐全（这六种都属于**类 B**：对应单例已成功返回）
+     注：**不设**"目录注册抛异常"用例——`SetMeetingSessionDirectory` 契约为 noexcept（§12.3.5.3）
 B17b 类 A 不被误称已覆盖：构造一个 `GetInstance()` 抛异常的变体（可用替身），
      断言文档/实现**不**声称该情形已被清理（该用例只验证"不误报"，不验证"安全"——
      因为类 A 的安全性依赖修改 AsioIOServicePool/RedisMgr，M6 明确不做）
@@ -3078,10 +3306,12 @@ B21  fail-stop 行为：注入 join 失败（可用测试替身）时，进程�
      且**不**输出"graceful shutdown"类日志；Redis 清理不宣称完成
 B22  兜底路径覆盖真实初始化失败点：至少选两个点注入异常
      （a）`HSet` 之后（pool + Redis 线程已启动、grpc 未登记）
-     （b）`SetMeetingSessionDirectory` 之后、`StartGrpcThread` 之前
+     （b）`LogicSystem::GetInstance()` 之后、`SetMeetingSessionDirectory` 之前
+     （即 logic 已登记、但目录尚未注册）
      断言：Cleanup() 由协调器析构兜底执行；pool 的 `_threads` 与 Redis 的
      `check_thread_` 均被 join；tcp_server（若已登记）在 drain 期间仍存活、
      Session Directory 仍可 lookup（证明方案 B 强引用生效）。
+     注：**不**使用"目录注册抛异常"作为注入点（该 API 为 noexcept 契约）
      注：**不要**用"run() 抛异常但不调用 Cleanup"作为该用例的构造方式——
      run() 抛异常路径**会**显式调用 Cleanup()（§12.3.7），不属于兜底路径
 B23  HDel 返回值语义（按 RedisMgr.cpp:282-306 的四种 false 来源分别构造）：
@@ -3190,8 +3420,8 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 ### 24.1 M6.0.2 的基线
 
 ```text
-进入本轮的远端基线 : origin/dev == HEAD == 8653a695fb4d794e0127224ef3ec60968bb0d916
-                     ⇒ M6.0.4 已发布
+进入本轮的远端基线 : origin/dev == HEAD == b116ccc084bc7e9b6ab21931722e2d8faaa193ee
+                     ⇒ M6.0.5 已发布
 进入本轮时状态     : working tree / index 均 clean
 本轮修改           : 仅 docs/phase2/M6-response-notification-adapter.md
 本轮 add/commit/push: 由本轮任务授权执行（结果见 §24.4）
@@ -3226,10 +3456,19 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 ### 24.3 历史记录更正
 
 ```text
-M6.0 记录过"本地 commit、未推送"；M6.0.1 以 3456c7f、M6.0.2 以 1454a8a、
-M6.0.3 以 2ffd083 为基线 —— 均为当时事实，之后都已推送：当前远端为 8653a69。
-因此任何"当前 HEAD = 1672888 / 3456c7f / 1454a8a / 2ffd083"的表述均属过期，不得沿用；
-`2ffd083` 的准确含义是 **M6.0.3 发布时的历史基线**。
+本节**不记录"当前远端是哪个 hash"**——那个值每轮都在变，写死必然过期。
+本文档采用的规则是（§24.2）：只有当
+    git rev-parse HEAD == git rev-parse origin/dev  且  git status --short 为空
+时才可声称"该修订已发布"；否则只能声称"仅本地已提交"或"仅工作区"。
+
+历史基线（仅供追溯，**均不是当前远端**）：
+    M6.0   = 3456c7f
+    M6.0.1 = 1454a8a
+    M6.0.2 = 2ffd083   （也是 M6.0.3 修订的起点基线）
+    M6.0.3 = db3eedb
+    M6.0.4 = 8653a69
+    M6.0.5 = b116ccc
+任何"当前 HEAD = 上述任一 hash"的表述均属过期，不得沿用。
 ```
 
 ---
