@@ -1418,7 +1418,7 @@ R-12c  Redis 跳过风险：Close() 在 try 尾部；异常路径上不会执行
 | 级别 | 步骤 | 失败后果 | 策略 |
 | --- | --- | --- | --- |
 | **K — 关键生命周期前置条件** | 1a `grpc_server->Shutdown()`<br>1b `pool->Stop()`<br>2 `ShutdownWorkExecutor()`<br>4b `redis->Close()`<br>5 `grpc_thread_.join()` | 失败意味着**仍可能有线程在运行**，或留下**joinable `std::thread`** | **fail-stop**：记录致命错误后立即终止进程；**不继续**后续步骤；**不重试**（非幂等） |
-| **B — best-effort** | 3 `ClearMeetingSessionDirectory()`<br>4a `redis->HDel(...)` | 失败不产生生命周期错误（前者 noexcept；后者只返回 bool） | 记录并继续 |
+| **B — best-effort** | 3 `ClearMeetingSessionDirectory()`<br>4a `redis->HDel(...)` | 失败不产生生命周期错误（前者 noexcept；后者只返回 bool）。注意 `HDel` 返回 `false` 的语义是"没有字段被删除"（field 不存在或删除无效果），**不等于**连接失败 | 记录非致命诊断并继续；不重试、不改变关闭流程 |
 
 **为什么恰好是这五步属于 K**：
 
@@ -1469,8 +1469,11 @@ public:
     }
 
     // **方案 B**：接收 shared_ptr 并**持有强引用**。
-    // 效果：tcp_server 的生命周期 ⊇ 协调器生命周期 ⇒ 协调器析构兜底执行 Cleanup() 时，
-    //       Session Directory 依然有效（无需"降级为 no-op"）。
+    // 效果（精确表述）：SetTcpServer() **成功之后**，协调器持有 tcp_server 的强引用，
+    //       并在其 Cleanup() 执行期间保持 tcp_server 存活 ⇒ Session Directory 依然有效
+    //       （无需"降级为 no-op"）。成员强引用要到协调器析构体执行完毕后才释放。
+    // 注意：**不能**说"tcp_server 的生命周期覆盖协调器从构造到析构的全过程"——
+    //       协调器先于 tcp_server 存在，SetTcpServer() 之前成员为空。
     void SetTcpServer(std::shared_ptr<CServer> tcp_server) { tcp_server_ = tcp_server; }
 
     ~ShutdownCoordinator() { Cleanup(); }
@@ -1497,7 +1500,17 @@ public:
                    [&]{ if (logic_ != nullptr) { logic_->ClearMeetingSessionDirectory(); } });
 
         BestEffort("4a redis HDel",
-                   [&]{ if (redis_) { redis_->HDel(LOGIN_COUNT, server_name_); } });
+                   [&]{
+                       if (!redis_) { return; }
+                       // 检查布尔返回值。**不要**把 false 直接断言为"Redis 连接失败"：
+                       // HDel 返回 false 也可能表示"该 field 不存在"或"本次没有实际删除"，
+                       // 这些都是正常语义。因此只记录非致命诊断，不改变关闭流程。
+                       if (!redis_->HDel(LOGIN_COUNT, server_name_)) {
+                           std::cerr << "shutdown diagnostic: redis HDel did not delete any field"
+                                        " (field may be absent, or deletion had no effect);"
+                                        " continuing shutdown" << std::endl;
+                       }
+                   });
 
         // ================= 回到 K 级 ===========================================
         Fatal("4b redis Close",
@@ -1669,7 +1682,7 @@ int main()
 | ⑦ `ShutdownWorkExecutor()` 为何在所有生产者之后 | 步骤 2 严格晚于 1a/1b；此时无生产者 | §12.3.10 |
 | ⑧ `Close → FINALIZE_CLOSE` drain 为何能完成 | `StopAndJoin` 先 `RequestStop` 再排空；内部入队通道只对消费者开放 | §12.3.10 |
 | ⑨ `ClearMeetingSessionDirectory()` 为何在 drain 之后 | 步骤 3 晚于步骤 2 | §12.3.5.2 |
-| ⑩ `tcp_server` 与 drain 的关系 | **方案 B 下**：协调器持强引用 ⇒ 即使走析构兜底，`tcp_server` 在 `Cleanup()` 体内仍然存活 ⇒ **drain 期间目录始终有效**，无需降级 | §12.3.8.1 |
+| ⑩ `tcp_server` 与 drain 的关系 | **方案 B 下**（前提：`tcp_server` 已成功构造并 `SetTcpServer()`）：协调器持强引用 ⇒ 即使走析构兜底，`tcp_server` 在 `Cleanup()` 体内仍然存活 ⇒ **drain 期间目录有效**，无需降级。若 `tcp_server` 构造即失败：目录未注册、gRPC 线程未启动，此时不存在"需要 lookup 的 drain"，也不得声称某个 TCP Server 仍存活 | §12.3.8.1 |
 | ⑪ Redis 清理如何覆盖异常路径 | 步骤 4a/4b 在 `Cleanup()` 内；4a best-effort、4b 关键（fail-stop） | §12.3.5.1 / §12.3.14 |
 | ⑫ 所有 `std::thread` 析构前为何不再 joinable | gRPC 线程 ← 步骤 5；pool `_threads` ← 1b；Redis `check_thread_` ← 4b；executor `worker_` ← 2。四者皆 K 级：失败即 fail-stop，不会继续到对象析构 | §12.3.9 |
 
@@ -1678,11 +1691,15 @@ int main()
 ```text
 采用方案 B：协调器成员为 std::shared_ptr<CServer> tcp_server_（强引用）。
 
-强引用关系：
-  main 的局部 shared_ptr  ──┐
-                            ├─→ CServer 对象（引用计数 ≥ 1 直到两者都释放）
-  协调器成员 tcp_server_ ───┘
-  LogicSystem 只持 weak_ptr<IMeetingSessionDirectory>（不参与计数）
+强引用关系（**分阶段**成立，不是全程成立）：
+  SetTcpServer() 之前 : 协调器成员 tcp_server_ 为空 ⇒ 协调器**不**持有 TCP Server
+                        （此时若 tcp_server 构造失败：目录未注册、gRPC 线程未启动；
+                          不得声称"某个 TCP Server 仍存活"）
+  SetTcpServer() 之后 : main 的局部 shared_ptr ──┐
+                                                 ├─→ CServer 对象（引用计数 ≥ 2）
+                        协调器成员 tcp_server_ ──┘
+                        ⇒ 协调器 Cleanup() 执行期间对象**必然存活**
+  LogicSystem 只持 weak_ptr<IMeetingSessionDirectory>（不参与计数，不延长生命周期）
 
 正常路径析构顺序：
   run() 返回 → 显式 Cleanup()（tcp_server 引用计数 ≥2，对象存活 ⇒ 目录有效）
@@ -1713,7 +1730,7 @@ tcp_server 构造失败：tcp_server_ 为空；无目录注册、无 worker 启�
 | 1b `pool->Stop()` | **K** | 是（`join` → `std::system_error`） | fail-stop（可能有 io_context 线程仍存活） |
 | 2 `ShutdownWorkExecutor()` | **K** | 是（`worker_.join()`） | fail-stop（worker 可能仍访问 MeetingService/Redis） |
 | 3 `ClearMeetingSessionDirectory()` | B | 否（`weak_ptr` 赋值 noexcept） | 记录并继续 |
-| 4a `redis->HDel(...)` | B | 否（返回 bool） | 记录并继续 |
+| 4a `redis->HDel(...)` | B | 否（返回 bool，且 `false` 可能只是"字段不存在/无删除"） | 检查返回值，`false` 时记录非致命诊断并继续；**不**推断为连接失败 |
 | 4b `redis->Close()` | **K** | 是（`check_thread_.join()`） | fail-stop（否则静态析构期 terminate） |
 | 5 `grpc_thread_.join()` | **K** | 是（`std::system_error`） | fail-stop（成员析构期 terminate） |
 
@@ -2414,9 +2431,17 @@ git push origin dev
 ```text
 风险：若只用"run() 之后的顺序代码"做清理，run() 抛异常会跳过 drain
 影响：高（worker 未 join、CServer 先析构 ⇒ 悬垂）
-缓解：协调器在 gRPC 线程启动后即建立，栈展开时析构并清理；tcp_server 由协调器
-      持 shared_ptr，未到 drain 结束不会析构（§12.3.5/§12.3.6）；
-      验收 B16。
+缓解（M6.0.3 后的**当前**方案，替换 M6.0.1 的旧描述）：
+  1. 协调器**先**建立（早于 tcp_server，也早于 gRPC 线程）；
+  2. gRPC 线程**延后**到所有可能失败的初始化之后才启动；
+     ⇒ 初始化阶段失败时根本没有已启动的裸 thread，不需要 join；
+  3. run() 抛异常 ⇒ 内层 catch(...) **先显式 Cleanup() 再 rethrow**（不是等析构兜底）；
+  4. 更早的初始化失败（Cleanup() 尚未被显式调用）⇒ 由协调器**析构兜底**清理；
+  5. tcp_server 由协调器持 shared_ptr ⇒ 上述清理执行期间它仍存活（§12.3.8.1）。
+验收 B16/B17/B22。
+
+历史说明：M6.0.1 曾写成"协调器在 gRPC 线程启动后即建立"，那是旧方案；
+M6.0.3 已把建立时机前移、把线程启动时机后移，本条目已按当前方案改写。
 ```
 
 ### R-13：collector 生命周期短于 adapter（M6.0.1 新增）
@@ -2442,11 +2467,22 @@ git push origin dev
 ### R-16：`pool->Stop()` 的 join 若失败，pool 的 `_threads` 仍可能 joinable（既有性质）
 
 ```text
-事实：AsioIOServicePool 没有 join 失败的补救路径；若 Stop() 内的 join 抛异常，
-      该 thread 仍 joinable，之后 _threads 析构会 std::terminate。
-性质：这是**既有代码**的性质，M6 不通过修改它来"证明安全"。
-M6 的贡献：Step() 捕获并记录失败，然后继续完成其余清理，
-           使失败不被静默跳过；本残余风险如实登记，不声称已消除。
+事实（底层性质，未改变）：AsioIOServicePool 没有 join 失败的补救路径；若 Stop() 内的
+      join 抛异常，该 thread 仍 joinable，之后 _threads 析构会 std::terminate。
+      M6 **不**修改 AsioIOServicePool.*，因此这一底层事实依旧存在。
+
+当前处理结论（M6.0.3 后，替换旧的"捕获并继续"策略）：
+  1. pool->Stop() 是 **K 级**步骤：其失败（含 join 抛异常）触发 **fail-stop**
+     （Fatal() → 记录致命错误 → std::abort()）；
+  2. 因此**不再继续**后续清理，也不再进入正常对象析构阶段；
+  3. **不重试**非幂等的 Stop()；
+  4. **不宣称**线程已成功 Join；
+  5. **不宣称**优雅关闭成功（Redis 清理可能未完成）。
+
+该策略的性质（必须如实表述）：
+  它把 R-16 **转化为进程异常终止**，而不是消除底层的 Join 失败。
+  fail-stop 的价值是"绝不在未停止的线程之上析构它们访问的对象"（那会是 UB 或 terminate），
+  代价是失去优雅关闭。本风险**仍然存在**，只是不再有机会演化为静默的 use-after-free。
 ```
 
 ### R-17：`BuildAndStart()` 可能返回空指针（既有，M6 不扩大范围修正）
@@ -2625,12 +2661,19 @@ M6.0.1 修的是 M6.0 文档内部的**自相矛盾**，不是新的范围争点
 | 项 | M6.0.1 的问题 | M6.0.2 裁决 | 依据 |
 | --- | --- | --- | --- |
 | C1 对象命名 / API | 把 TCP `CServer` 命名 `server`，与源码中 `unique_ptr<grpc::Server> server` 冲突；并暗示 `CServer` 有 `Shutdown()` | 固定命名 `grpc_server` / `tcp_server` / `grpc_server_thread` / `io_context` / `pool`；关闭 gRPC 用 `grpc_server->Shutdown()`；**不虚构** `CServer::Shutdown()` | §12.3.1 / §12.3.6 |
-| C2 异常安全覆盖 | Guard 只覆盖 `run()` 之后；`on_leave` 为 nullptr；gRPC 线程早于 guard 启动 ⇒ 更早异常会 terminate | 全生命周期 `ShutdownCoordinator`：在 gRPC 线程启动后立即构造；每步独立 try/catch；`Cleanup()` 不抛 | §12.3.5 / §12.3.7 / §12.3.9 |
+| C2 异常安全覆盖 | Guard 只覆盖 `run()` 之后；`on_leave` 为 nullptr；gRPC 线程早于 guard 启动 ⇒ 更早异常会 terminate | 全生命周期 `ShutdownCoordinator`；每步独立 try/catch；`Cleanup()` 不抛。**⚠ 本行的"在 gRPC 线程启动后立即构造"已被 M6.0.3 取代**（改为协调器先建、线程延后启动，见 §19.8 D1 与 §12.3.6） | §12.3.5 / §12.3.6 |
 | C3 信号回调线程模型 | 声称回调在 pool 线程上、可能自我 Join | **删除**该结论：按源码回调在主线程（A6–A8）；单一 Stop 调用点的理由改为"非幂等 + 顺序可证明" | §12.3.1 / §12.3.4 |
 | C4 目标形态完整性 | 未回答 12 个生命周期问题 | §12.3.7 四条路径 + §12.3.8 逐条回答 + §12.3.9 异常性 + §12.3.12 更早失败 | §12.3.7–§12.3.12 |
 
 **Phase 1 仍然完全冻结**：以上四项同样是文档内部一致性与实现可行性修正，
 没有修改、豁免或放宽 Phase 1 的任何条款。
+
+> **设计演进说明（M6.0.4 补注）**：§19.6 / §19.7 记录的是 M6.0.1 / M6.0.2 **当时**的裁决，
+> 作为演进历史保留。其中已被后续轮次取代的部分：
+> - §19.7 C2 的"协调器在 gRPC 线程启动后立即构造" → 被 M6.0.3 改为**协调器先建、线程延后启动**（§19.8 D1、§12.3.6）；
+> - §19.7 的"每步 try/catch 然后继续" → 被 M6.0.3 改为**K 级 fail-stop / B 级 best-effort 分级**（§19.8 D1、§12.3.5.1）；
+> - §19.7 的 `CServer*`（非拥有）→ 被 M6.0.3 改为 `std::shared_ptr<CServer>`（§19.8 D2、§12.3.8.1）。
+> **当前规范性结论以 §12.3 与 §19.8 为准**；上表仅用于追溯为什么这样裁决。
 
 ### 19.8 M6.0.3 追加的裁决
 
@@ -2715,8 +2758,15 @@ A11  MeetingView 的每次字段读取都位于 has_view == true 分支内（§1
 A12  lookup 返回 shared_ptr；无 .get() 造第二控制块（§8.6）
 A15  IMeetingLiveSession 的全部成员函数为 const；lookup 返回 shared_ptr<const ...>；
      adapter 不调用任何发送方法（§8.2.3 编译期 + 静态检查）
-A16  AsioIOServicePool::Stop() **恰好一个**调用点，且位于 io_context.run() 之后的 guard 内
-     （静态检查：全仓 grep 'pool->Stop\|->Stop()' 在 ChatServer.cpp 只有一处，且不在 signal 回调）
+A16  AsioIOServicePool::Stop() **恰好一个**调用点，位于 ShutdownCoordinator::Cleanup() 的
+     K 级步骤 1b；`done_` 闸门阻止重复执行；信号回调只调用 io_context.stop()。
+     静态检查：全仓 grep 'pool->Stop' 在 ChatServer.cpp 只有 Cleanup() 内一处，且不在 signal 回调。
+     四条路径均与该调用点一致：
+       (a) 正常关闭        —— run() 返回后**显式** Cleanup()
+       (b) run() 抛异常    —— 内层 catch(...) **先显式** Cleanup() 再 rethrow
+       (c) 初始化抛异常    —— 由协调器析构兜底 Cleanup()（此时可能从未执行过 run()）
+       (d) 由 (c) 可知：**不能**把所有路径都描述成"run() 之后的 guard"，
+           因为初始化失败时 run() 可能根本没有被调用（§12.3.7）
 A17  LogicSystem 成员声明顺序为
      _outbound_collector → _meeting_adapter → _dispatcher → _work_executor（§12.2.3）
 A18  collector 不是任何函数的局部变量：由 LogicSystem 以 unique_ptr 成员独占拥有（§12.1）
@@ -2724,20 +2774,44 @@ A19  MeetingNotificationMessage 每条构造都显式赋值非空 notification_t
      通知条数 == target_resolved（§7.1.3）
 A20  命名契约：示例中 gRPC 对象为 grpc_server、TCP 对象为 tcp_server，
      不存在名为 server 的 TCP 对象；且**不调用** CServer::Shutdown()（该方法不存在）
-A21  清理范围覆盖 gRPC 线程启动后的所有异常路径：协调器在 grpc_server_thread
-     启动后、tcp_server 构造前建立（§12.3.7）
-A22  每个清理步骤都在独立 try/catch 内（ShutdownCoordinator::Step），
-     Cleanup() 本身不抛；不依赖"析构永不失败"的假设（§12.3.9）
-A23  `Cleanup()` 在 `tcp_server` 作用域内被**显式调用**（正常与 run() 异常两条路径）；
-     协调器持有 `CServer*` 仅作登记，不拥有；LogicSystem 仍只持 weak_ptr（§12.3.6 / §12.3.8.1）
+A21  构造/启动顺序与目标代码逐项一致（§12.3.6），且该顺序本身承载异常安全：
+       1. 构造 grpc_server、io_context、signals
+       2. 构造 ShutdownCoordinator        ← 早于 tcp_server，覆盖其构造失败
+       3. 构造 tcp_server，并 SetTcpServer() 交给协调器持强引用
+       4. SetMeetingSessionDirectory() 注册目录
+       5. StartGrpcThread()               ← 延后到所有可能失败的初始化之后
+       6. io_context.run()，异常路径先显式 Cleanup() 再 rethrow
+     异常安全意义：第 2 步早于第 3 步 ⇒ 第 3/4 步失败时有协调器可清理且无 gRPC 线程；
+                   第 5 步最后 ⇒ 不存在"裸 std::thread 已启动但无人 join"的窗口。
+     **不得**再把顺序表述为"协调器在 gRPC 线程启动之后建立"（那是 M6.0.1 的旧方案）
+A22  清理步骤按级别使用两个包装，且**不存在**名为 Step() 的 API：
+       · Fatal()      —— K 级关键步骤（1a/1b/2/4b/5）；失败时记录致命错误并 **std::abort()**（fail-stop）
+       · BestEffort() —— B 级非关键步骤（3/4a）；失败时记录非致命诊断并继续
+     Cleanup() 正常返回 ⇒ 五个 K 级步骤**均已成功完成**；
+     fail-stop 路径**不返回**（进程终止），因此不存在"返回了但其实关键步骤失败"的状态。
+     **不得**把"所有步骤都被 try/catch 包裹"误写成"所有异常都能安全恢复"：
+     关键步骤的异常是**不可恢复**的，靠终止进程而非恢复流程来保证安全（§12.3.5.1 / §12.3.9）
+A23  `tcp_server` 所有权 = **方案 B**：协调器成员类型为 `std::shared_ptr<CServer> tcp_server_`，
+     `SetTcpServer()` 接收 `std::shared_ptr<CServer>`（**不是**非拥有裸指针；LogicSystem 仍只持 weak_ptr）。
+     生命周期论证按阶段成立（§12.3.8.1）：
+       · `tcp_server` 构造成功并 `SetTcpServer()` **之前**：成员为空，协调器不持有任何 TCP Server；
+         此时若构造失败，**目录尚未注册、gRPC 线程尚未启动**，不得声称"某个 TCP Server 仍存活"
+       · `SetTcpServer()` **成功之后**：协调器持有强引用，并在其 `Cleanup()` 执行期间
+         保证 `tcp_server` 存活（⇒ drain 期间 Session Directory 有效）
+       · 成员强引用在该强引用被释放时才归零；协调器析构体执行期间对象仍存活
+     **不得**表述为"tcp_server 的生命周期覆盖协调器从构造到析构的全过程"——
+     协调器先于 `tcp_server` 存在，该说法不成立（§12.3.8.1）
 A24  gRPC 线程由协调器**按值**持有（成员 `std::thread`），不是指向局部变量的裸指针；
      且 `StartGrpcThread()` 位于所有可能失败的初始化之后（§12.3.5 / §12.3.6）
 A25  信号回调仅调用 `io_context.stop()`，不调用 pool->Stop / ShutdownWorkExecutor /
      grpc_server->Shutdown（静态检查）
 A26  清理步骤已分级：1a/1b/2/4b/5 为 K 级（失败 fail-stop），3/4a 为 best-effort；
      不存在"关键步骤失败后仍继续"的代码路径（§12.3.5.1 / §12.3.9）
-A27  `tcp_server_` 成员类型为 `std::shared_ptr<CServer>`（方案 B），
-     `SetTcpServer` 接收 `shared_ptr`；协调器持强引用 ⇒ 兜底 Cleanup 期间目录有效（§12.3.8.1）
+A27  `tcp_server` 的强引用论证必须是**分阶段**的，不得过度声称：
+       · `SetTcpServer()` 之前：成员为空、协调器不持有 TCP Server（此阶段构造失败时，
+         目录未注册、gRPC 线程未启动，**不得**声称"某个 TCP Server 仍存活"）
+       · `SetTcpServer()` 之后：协调器持强引用，`Cleanup()` 执行期间保持其存活
+     全文不得出现"tcp_server 的生命周期覆盖协调器从构造到析构全过程"这类表述（§12.3.8.1）
 A28  不对 `pool->Stop()` / `RedisMgr::Close()` 做任何重试；
      失败路径只有 fail-stop，没有"再试一次"（§12.3.5.2）
 A13  message.proto / *.sln / *.vcxproj / *.props / *.filters / MyChat_Qt / ChatServer2 零改动
@@ -2773,8 +2847,15 @@ B20  顺序不变量：Redis 的 HDel/Close 在日志中晚于 grpc Shutdown 与
      （守护 R-18'a；若顺序被改动则该用例失败）
 B21  fail-stop 行为：注入 join 失败（可用测试替身）时，进程以非零信号终止，
      且**不**输出"graceful shutdown"类日志；Redis 清理不宣称完成
-B22  兜底路径目录有效：在 run() 抛异常且**不**显式调用 Cleanup 的变体下，
-     断言 drain 期间同步通知的 target_resolved 计数正常（证明方案 B 的强引用生效）
+B22  兜底路径目录有效：构造一个**初始化阶段抛异常**的变体（例如 SetMeetingSessionDirectory
+     之后、StartGrpcThread 之前抛），使 Cleanup() 只能由协调器析构兜底执行；
+     断言此时 drain 期间 tcp_server 仍存活、Session Directory 仍可 lookup
+     （证明方案 B 的强引用生效）。
+     注：**不要**用"run() 抛异常但不调用 Cleanup"作为该用例的构造方式——
+     run() 抛异常路径**会**显式调用 Cleanup()（§12.3.7），不属于兜底路径
+B23  HDel 返回值语义：让 HDel 返回 false（field 不存在 / 无实际删除）时，
+     断言关闭流程**继续**、日志为非致命诊断，且**不**输出"Redis 连接失败"这类断言性结论；
+     另外验证关闭仍正常走到 4b/5（证明 false 未被误判为致命）
 ```
 
 ### 21.3 工程类
