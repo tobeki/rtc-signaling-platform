@@ -1,56 +1,45 @@
-#pragma once
+ï»¿#pragma once
 #include "const.h"
 #include "hiredis.h"
 #include <queue>
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <condition_variable>
 #include "Singleton.h"
 #include <cstring>
+#include <iostream>
 
 class RedisConPool {
 public:
-	RedisConPool(size_t poolSize, const char* host, int port, const char* pwd)
-		: poolSize_(poolSize), host_(host), port_(port), b_stop_(false), pwd_(pwd), counter_(0), fail_count_(0) {
+	RedisConPool(size_t poolSize, const std::string& host, int port, const std::string& pwd)
+		: b_stop_(false), poolSize_(poolSize), host_(host), pwd_(pwd), port_(port),
+		  fail_count_(0), counter_(0) {
 		for (size_t i = 0; i < poolSize_; ++i) {
-			auto* context = redisConnect(host, port);
-			if (context == nullptr || context->err != 0) {
-				if (context != nullptr) {
-					redisFree(context);
-				}
-				continue;
+			auto* context = CreateAuthenticatedContext();
+			if (context != nullptr) {
+				connections_.push(context);
 			}
-
-			auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd);
-			if (reply->type == REDIS_REPLY_ERROR) {
-				std::cout << "ÈÏÖ¤Ê§°Ü" << std::endl;
-				//Ö´ĞĞ³É¹¦ ÊÍ·ÅredisCommandÖ´ĞĞºó·µ»ØµÄredisReplyËùÕ¼ÓÃµÄÄÚ´æ
-				freeReplyObject(reply);
-				continue;
-			}
-
-			//Ö´ĞĞ³É¹¦ ÊÍ·ÅredisCommandÖ´ĞĞºó·µ»ØµÄredisReplyËùÕ¼ÓÃµÄÄÚ´æ
-			freeReplyObject(reply);
-			std::cout << "ÈÏÖ¤³É¹¦" << std::endl;
-			connections_.push(context);
 		}
 
 		check_thread_ = std::thread([this]() {
-			while (!b_stop_) {
+			while (!b_stop_.load()) {
 				counter_++;
 				if (counter_ >= 60) {
 					checkThreadPro();
 					counter_ = 0;
 				}
 
-				std::this_thread::sleep_for(std::chrono::seconds(1)); // Ã¿¸ô 30 Ãë·¢ËÍÒ»´Î PING ÃüÁî
+				std::this_thread::sleep_for(std::chrono::seconds(1));
 			}
 			});
 	}
 
 	~RedisConPool() {
-
+		Close();
+		ClearConnections();
 	}
 
 	void ClearConnections() {
@@ -62,17 +51,19 @@ public:
 		}
 	}
 
+	// æœ‰ç•Œè·å–ï¼ˆR-20 å¥‘çº¦ç¬¬ 4 é¡¹ï¼‰ï¼šè¶…æ—¶æˆ– Close() ä¹‹åè¿”å› nullptrã€‚
+	// ç­‰å¾…æœŸé—´ä¼šé‡Šæ”¾äº’æ–¥é‡ï¼Œå› æ­¤å…¶ä»–çº¿ç¨‹çš„å½’è¿˜æˆ– Close ä¸ä¼šè¢«ç­‰å¾…è€…é˜»å¡ã€‚
 	redisContext* getConnection() {
 		std::unique_lock<std::mutex> lock(mutex_);
-		cond_.wait(lock, [this] {
-			if (b_stop_) {
-				return true;
-			}
-			return !connections_.empty();
-			});
-		//Èç¹ûÍ£Ö¹ÔòÖ±½Ó·µ»Ø¿ÕÖ¸Õë
-		if (b_stop_) {
-			return  nullptr;
+		const bool signaled = cond_.wait_for(
+			lock,
+			std::chrono::milliseconds(kAcquireTimeoutMs),
+			[this]() { return b_stop_.load() || !connections_.empty(); });
+		if (b_stop_.load()) {
+			return nullptr;
+		}
+		if (!signaled) {
+			return nullptr;
 		}
 		auto* context = connections_.front();
 		connections_.pop();
@@ -80,8 +71,8 @@ public:
 	}
 
 	redisContext* getConNonBlock() {
-		std::unique_lock<std::mutex> lock(mutex_);
-		if (b_stop_) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (b_stop_.load()) {
 			return nullptr;
 		}
 
@@ -94,165 +85,177 @@ public:
 		return context;
 	}
 
+	// æ‰€æœ‰æƒï¼šClose() ä¹‹åè¿æ¥æ± ä¸å†æ¥æ”¶è¿æ¥ï¼Œ
+	// å¿…é¡»é‡Šæ”¾è¯¥ contextï¼Œè€Œä¸èƒ½é™é»˜ä¸¢å¼ƒæŒ‡é’ˆï¼ˆå¦åˆ™æ³„æ¼ï¼‰ã€‚
 	void returnConnection(redisContext* context) {
-		std::lock_guard<std::mutex> lock(mutex_);
-		if (b_stop_) {
+		if (context == nullptr) {
 			return;
 		}
-		connections_.push(context);
-		cond_.notify_one();
+		bool must_free = false;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (b_stop_.load()) {
+				must_free = true;
+			}
+			else {
+				connections_.push(context);
+				cond_.notify_one();
+			}
+		}
+		if (must_free) {
+			redisFree(context);
+		}
 	}
 
+	// ä¸¢å¼ƒå·²ç»å¤±æ•ˆçš„è¿æ¥ï¼ˆI/O é”™è¯¯æˆ–å‘½ä»¤è¶…æ—¶ï¼‰ã€‚
+	// å¥åº·æ£€æŸ¥çº¿ç¨‹ä¼šåœ¨ fail_count_ > 0 æ—¶æŒ‰æ—¢æœ‰æœºåˆ¶é‡è¿ã€‚
+	void discardConnection(redisContext* context) {
+		if (context == nullptr) {
+			return;
+		}
+		redisFree(context);
+		fail_count_++;
+	}
+
+	// å¹‚ç­‰ï¼šåœæ­¢æ ‡å¿—åœ¨æŒé”æ—¶æ›´æ–°ï¼Œè§£é”åå†å”¤é†’ç­‰å¾…è€…ï¼›
+	// åªæœ‰ä¸€ä¸ªè°ƒç”¨è€…èƒ½æŠŠçº¿ç¨‹ç§»å‡ºå¹¶ joinï¼Œä¸” join æœ¬èº«ä¸æŒé”ã€‚
 	void Close() {
-		b_stop_ = true;
+		std::thread to_join;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			b_stop_.store(true);
+			if (check_thread_.joinable()) {
+				to_join = std::move(check_thread_);
+			}
+		}
 		cond_.notify_all();
-		check_thread_.join();
+		if (to_join.joinable()) {
+			to_join.join();
+		}
 	}
 
 private:
-	bool  reconnect() {
-		auto context = redisConnect(host_, port_);
+	enum {
+		kAcquireTimeoutMs = 1000,
+		kConnectTimeoutSeconds = 1,
+		kCommandTimeoutSeconds = 2
+	};
+
+	static struct timeval ConnectTimeout() {
+		struct timeval tv;
+		tv.tv_sec = kConnectTimeoutSeconds;
+		tv.tv_usec = 0;
+		return tv;
+	}
+
+	static struct timeval CommandTimeout() {
+		struct timeval tv;
+		tv.tv_sec = kCommandTimeoutSeconds;
+		tv.tv_usec = 0;
+		return tv;
+	}
+
+	// ä¸ºå‘½ä»¤ã€PING å’Œ AUTH è®¾ç½® socket è¯»å†™è¶…æ—¶ã€‚
+	// æ³¨æ„ï¼šè¿™æ˜¯ I/O æ“ä½œè¶…æ—¶ï¼Œä¸æ˜¯æ•´æ¡å‘½ä»¤çš„ç¡¬æ€§æ€»æœŸé™ã€‚
+	static bool ApplyCommandTimeout(redisContext* context) {
+		if (context == nullptr) {
+			return false;
+		}
+		return redisSetTimeout(context, CommandTimeout()) == REDIS_OK;
+	}
+
+	// æ–°å»ºè¿æ¥çš„å”¯ä¸€å…¥å£ï¼šä¾æ¬¡å®Œæˆâ€œå»ºç«‹è¿æ¥ + é…ç½®è¶…æ—¶ + AUTHâ€ã€‚
+	// ä»»ä¸€æ­¥å¤±è´¥éƒ½è¿”å› nullptrï¼Œä¸”ä¸ä¼šæ³„æ¼ context æˆ– replyã€‚
+	redisContext* CreateAuthenticatedContext() {
+		auto* context = redisConnectWithTimeout(host_.c_str(), port_, ConnectTimeout());
 		if (context == nullptr || context->err != 0) {
 			if (context != nullptr) {
 				redisFree(context);
 			}
-			return false;
+			return nullptr;
 		}
 
-		auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
+		if (!ApplyCommandTimeout(context)) {
+			redisFree(context);
+			return nullptr;
+		}
+
+		auto* reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_.c_str());
+		if (reply == nullptr) {
+			// AUTH I/O å¤±è´¥æˆ–è¶…æ—¶ï¼šè¯¥è¿æ¥ä¸å¯ç”¨ã€‚
+			redisFree(context);
+			return nullptr;
+		}
 		if (reply->type == REDIS_REPLY_ERROR) {
-			std::cout << "ÈÏÖ¤Ê§°Ü" << std::endl;
-			//Ö´ĞĞ³É¹¦ ÊÍ·ÅredisCommandÖ´ĞĞºó·µ»ØµÄredisReplyËùÕ¼ÓÃµÄÄÚ´æ
+			std::cout << "è®¤è¯å¤±è´¥" << std::endl;
 			freeReplyObject(reply);
 			redisFree(context);
+			return nullptr;
+		}
+
+		freeReplyObject(reply);
+		std::cout << "è®¤è¯æˆåŠŸ" << std::endl;
+		return context;
+	}
+
+	bool reconnect() {
+		if (b_stop_.load()) {
 			return false;
 		}
 
-		//Ö´ĞĞ³É¹¦ ÊÍ·ÅredisCommandÖ´ĞĞºó·µ»ØµÄredisReplyËùÕ¼ÓÃµÄÄÚ´æ
-		freeReplyObject(reply);
-		std::cout << "ÈÏÖ¤³É¹¦" << std::endl;
+		auto* context = CreateAuthenticatedContext();
+		if (context == nullptr) {
+			return false;
+		}
+
 		returnConnection(context);
 		return true;
 	}
 
 	void checkThreadPro() {
-		size_t pool_size;
+		size_t pool_size = 0;
 		{
-			// ÏÈÄÃµ½µ±Ç°Á¬½ÓÊı
 			std::lock_guard<std::mutex> lock(mutex_);
+			if (b_stop_.load()) {
+				return;
+			}
 			pool_size = connections_.size();
 		}
 
-		for (int i = 0; i < pool_size && !b_stop_; ++i) {
-			redisContext* ctx = nullptr;
-			// 1) È¡³öÒ»¸öÁ¬½Ó(³ÖÓĞËø)
-			bool bsuccess = false;
+		for (size_t i = 0; i < pool_size && !b_stop_.load(); ++i) {
 			auto* context = getConNonBlock();
 			if (context == nullptr) {
 				break;
 			}
 
-			redisReply* reply = nullptr;
-			try {
-				reply = (redisReply*)redisCommand(context, "PING");
-				// 2. ÏÈ¿´µ×²ã I/O£¯Ğ­Òé²ãÓĞÃ»ÓĞ´í
-				if (context->err) {
-					std::cout << "Connection error: " << context->err << std::endl;
-					if (reply) {
-						freeReplyObject(reply);
-					}
-					redisFree(context);
-					fail_count_++;
-					continue;
-				}
-
-				// 3. ÔÙ¿´ Redis ×ÔÉí·µ»ØµÄÊÇ²»ÊÇ ERROR
-				if (!reply || reply->type == REDIS_REPLY_ERROR) {
-					std::cout << "reply is null, redis ping failed: " << std::endl;
-					if (reply) {
-						freeReplyObject(reply);
-					}
-					redisFree(context);
-					fail_count_++;
-					continue;
-				}
-				// 4. Èç¹û¶¼Ã»ÎÊÌâ£¬Ôò»¹»ØÈ¥
-				freeReplyObject(reply);
-				returnConnection(context);
-			}
-			catch (std::exception& exp) {
-				if (reply) {
+			auto* reply = (redisReply*)redisCommand(context, "PING");
+			if (context->err != 0 || reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
+				std::cout << "reply is null, redis ping failed: " << std::endl;
+				if (reply != nullptr) {
 					freeReplyObject(reply);
 				}
-
 				redisFree(context);
 				fail_count_++;
+				continue;
 			}
+
+			freeReplyObject(reply);
+			returnConnection(context);
 		}
 
-		//Ö´ĞĞÖØÁ¬²Ù×÷
-		while (fail_count_ > 0) {
-			auto res = reconnect();
-			if (res) {
-				fail_count_--;
-			}
-			else {
-				//Áô¸øÏÂ´ÎÔÙÖØÊÔ
+		// å¥‘çº¦ç¬¬ 12 é¡¹ï¼šClose() ä¹‹åä¸å¾—å†å¼€å§‹æ–°çš„é‡è¿ã€‚
+		while (fail_count_ > 0 && !b_stop_.load()) {
+			if (!reconnect()) {
 				break;
 			}
-		}
-	}
-
-	void checkThread() {
-		std::lock_guard<std::mutex> lock(mutex_);
-		if (b_stop_) {
-			return;
-		}
-		auto pool_size = connections_.size();
-		for (int i = 0; i < pool_size && !b_stop_; i++) {
-			auto* context = connections_.front();
-			connections_.pop();
-			try {
-				auto reply = (redisReply*)redisCommand(context, "PING");
-				if (!reply) {
-					std::cout << "reply is null, redis ping failed: " << std::endl;
-					connections_.push(context);
-					continue;
-				}
-				freeReplyObject(reply);
-				connections_.push(context);
-			}
-			catch (std::exception& exp) {
-				std::cout << "Error keeping connection alive: " << exp.what() << std::endl;
-				redisFree(context);
-				context = redisConnect(host_, port_);
-				if (context == nullptr || context->err != 0) {
-					if (context != nullptr) {
-						redisFree(context);
-					}
-					continue;
-				}
-
-				auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
-				if (reply->type == REDIS_REPLY_ERROR) {
-					std::cout << "ÈÏÖ¤Ê§°Ü" << std::endl;
-					//Ö´ĞĞ³É¹¦ ÊÍ·ÅredisCommandÖ´ĞĞºó·µ»ØµÄredisReplyËùÕ¼ÓÃµÄÄÚ´æ
-					freeReplyObject(reply);
-					continue;
-				}
-
-				//Ö´ĞĞ³É¹¦ ÊÍ·ÅredisCommandÖ´ĞĞºó·µ»ØµÄredisReplyËùÕ¼ÓÃµÄÄÚ´æ
-				freeReplyObject(reply);
-				std::cout << "ÈÏÖ¤³É¹¦" << std::endl;
-				connections_.push(context);
-			}
+			fail_count_--;
 		}
 	}
 
 	std::atomic<bool> b_stop_;
 	size_t poolSize_;
-	const char* host_;
-	const char* pwd_;
+	std::string host_;
+	std::string pwd_;
 	int port_;
 	std::queue<redisContext*> connections_;
 	std::atomic<int> fail_count_;
@@ -301,4 +304,3 @@ private:
 	RedisMgr();
 	std::unique_ptr<RedisConPool>  _con_pool;
 };
-

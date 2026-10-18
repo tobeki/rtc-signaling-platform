@@ -3847,6 +3847,10 @@ fail-stop 是本设计对"不可恢复的关闭失败"的**明确策略**，不�
 的析构都不负责 join 其线程（前者 Stop() 被注释掉，后者析构为空）。
 ⇒ 修法只能是修改这两个文件（其中一个为 GBK，明确禁止），因此 M6 **不声称覆盖类 A**，
   并将其登记为 R-16（pool）与 R-19（Redis）之外的既有构造期缺陷。
+
+（M6.0.8 / M6.6a 更新：RedisMgr 已获授权修改，`~RedisConPool()` 已提供 join 保障
+  （§12.3.16 第 10 项），且该文件已转为 UTF-8；A-1（AsioIOServicePool）仍不覆盖。
+  本段的"GBK 明确禁止"只描述 M6.0.5 当时的授权状态。）
 ```
 
 **Phase 1 仍然完全冻结**：E1–E3 同样是文档内部一致性与实现可行性修正，
@@ -4261,8 +4265,9 @@ R6                          = **DEFERRED → 独立任务**
   CSession.h/.cpp           : UTF-8（M5 §7.2 授权转换）
   ChatServer.cpp            : UTF-8 带 BOM（现有文件；修改时需保持）
   AsioIOServicePool.h/.cpp  : **GBK**（既有；M6 不修改）
-  RedisMgr.h/.cpp           : **GBK**（既有；M6.0.8 授权修改，**必须保持 GBK**，不得转码）
-M6 不主动转换任何既有文件编码。
+  RedisMgr.h/.cpp           : **UTF-8（带 BOM）**（经人工显式授权由 GBK 转换；
+                              注释已中文化；日志字面量随之使用 UTF-8 执行字符集）
+M6 不主动转换任何既有文件编码；RedisMgr.h/.cpp 的转码是经人工显式授权的例外。
 ```
 
 ---

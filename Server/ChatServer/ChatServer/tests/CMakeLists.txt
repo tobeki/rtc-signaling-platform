@@ -70,3 +70,36 @@ target_link_libraries(ChatServerUnitTests PRIVATE
 # easily-drifting duplicate list.
 include(GoogleTest)
 gtest_discover_tests(ChatServerUnitTests)
+
+# ------------------------------------------------------------------------------
+# M6.6a / R-20: RedisConPool contract tests.
+#
+# Deliberately a SEPARATE executable:
+#   * RedisConPool is defined in RedisMgr.h and needs hiredis only (no ConfigMgr,
+#     no Boost.Filesystem, no config.ini);
+#   * ChatServerUnitTests must stay Redis-free, so this never joins that target;
+#   * RedisMgr.cpp is still NOT compiled here: it calls ConfigMgr::Inst(), which
+#     reads config.ini through Boost.Filesystem. The RedisMgr HSet/HDel wrapper
+#     behaviour is covered by the ChatServer runtime tests instead (M6.6/M6.7).
+#
+# PkgConfig::HIREDIS comes from the parent CMakeLists.txt (pkg_check_modules),
+# and Threads::Threads from the parent find_package(Threads) call. No new
+# third-party dependency is introduced.
+# ------------------------------------------------------------------------------
+add_executable(RedisConPoolContractTest
+    RedisConPoolContractTest.cpp
+)
+
+target_compile_features(RedisConPoolContractTest PRIVATE cxx_std_14)
+
+target_include_directories(RedisConPoolContractTest PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+
+target_link_libraries(RedisConPoolContractTest PRIVATE
+    GTest::gtest_main
+    PkgConfig::HIREDIS
+    Threads::Threads
+)
+
+gtest_discover_tests(RedisConPoolContractTest)
