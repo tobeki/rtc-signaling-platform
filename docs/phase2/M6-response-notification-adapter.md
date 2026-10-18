@@ -1,10 +1,11 @@
 # Phase 2 - M6：Response / Notification Adapter
 
-> 状态：**DESIGN COMPLETE（M6.0 Architecture Adjudication 已裁决；Coding NOT STARTED）**
+> 状态：**DESIGN COMPLETE（M6.0 已裁决 + M6.0.1 一致性复核；Coding NOT STARTED）**
 > Phase 2 M-planning 原始基线：`da19189a55ab13058a22c38c228d3043df72bdf6`（M5.1 收尾）
 > 本文档首次提交：`afad0644170b0882ee6b58ed99c493e82909a70f`（`docs(phase2): add M6-response-notification-adapter.md`）
-> 本文档当前修订：**M6.0 设计修订**（工作区状态见 §1.3 与 §24）
-> M6 Coding：**NOT STARTED**
+> 已发布的 M6.0 基线：`3456c7f96767ea23c59f856aca12ba50deb41699`（`docs(phase2): adjudicate M6 design - transport-neutral outbound boundary`）
+> 本文档当前修订：**M6.0.1 — Shutdown & Outbound Contract Consistency Review**（工作区状态见 §1.3 与 §24）
+> M6 Coding：**NOT STARTED**（Final Coding Gate 由人工 Review 决定）
 
 ---
 
@@ -16,12 +17,15 @@
 | --- | --- |
 | Phase 2 M-planning 原始基线 | `da19189a55ab13058a22c38c228d3043df72bdf6`（HEAD == origin/dev，M5.1 收尾） |
 | 本文档首次提交（Phase 2 M6 Planning） | `afad0644170b0882ee6b58ed99c493e82909a70f` — `docs(phase2): add M6-response-notification-adapter.md` |
-| 本修订轮次 | **M6.0 — Architecture Adjudication & Design Revision** |
-| 本修订依据 | 对 `afad064`（文档）+ 代码（`da19189`..`afad064` 期间代码未变）的只读复核；**未修改任何代码** |
+| **已发布的 M6.0 基线** | `3456c7f96767ea23c59f856aca12ba50deb41699` — `docs(phase2): adjudicate M6 design - transport-neutral outbound boundary` |
+| 本修订轮次 | **M6.0.1 — Shutdown & Outbound Contract Consistency Review** |
+| 本修订依据 | 对 `3456c7f`（文档）与当前代码的只读复核；**未修改任何代码** |
 | M6 Coding | **NOT STARTED** |
 | 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮零修改** |
 
-### 1.2 本修订解决的问题（M6.0 六项）
+### 1.2 本修订解决的问题
+
+**M6.0（已发布 `3456c7f`）解决六项：**
 
 ```text
 1. TCP message ID 与出站接口：剔除占位 msgid，改为严格 transport-neutral 的 typed 出站边界（§6、§7）
@@ -32,26 +36,38 @@
 6. Context Builder 身份来源：只用服务端可信身份，绝不读 _user_uid（§14）
 ```
 
-### 1.3 提交状态（不得提前声称已推送）
+**M6.0.1（本轮）修正 M6.0 遗留的五处阻塞项：**
 
 ```text
-本轮（M6.0）只修改本文件 docs/phase2/M6-response-notification-adapter.md。
+B1  AsioIOServicePool::Stop() **非幂等**（§12.3 原方案会在信号回调与清理路径各调一次）
+    → 采用方案 A：单一 Stop 调用点 + scope guard；详见 §12.3
+B2  §12.2 成员声明顺序与逆序析构论证有误
+    → 更正为 _outbound_collector → _meeting_adapter → _dispatcher → _work_executor；详见 §12.2
+B3  IMeetingOutboundSink::AcceptMeetingOutbound 为非 const，却经 shared_ptr<const ...> 返回
+    → 改为 const-correct 的**存活标记**接口 IMeetingLiveSession；详见 §8.2 / §8.3
+B4  通知逐目标算法与 collector 所有权未写死（多目标可能复用单条消息；collector 有悬垂风险）
+    → 给出逐目标算法 + collector 由 LogicSystem 拥有；详见 §7.1 / §12.1
+B5  §1.3 / §24 的 Git 状态已过期（`3456c7f` 实际已在 origin/dev）
+    → 已更正；详见 §1.3
+```
 
-本地提交  : 存在一条本地 commit，subject 为
-            "docs(phase2): adjudicate M6 design - transport-neutral outbound boundary"
-            （具体 hash 以 `git log -1` 为准；本文档刻意不内嵌自己的 commit hash，
-              否则任何 amend 都会让它立刻过期）
-推送状态  : **NOT PUSHED** —— `git push origin dev` 失败：
-            "Failed to connect to 127.0.0.1 port 7897"（WSL 内配置的 HTTP 代理未运行）
-            直连 github.com 亦不可达（curl 返回 000）；无 credential.helper、无 SSH key。
-            ⇒ 修订已安全落盘于本地 commit，但**尚未到达 origin/dev**。
+### 1.3 提交状态（必须与远端事实一致）
 
-待网络恢复后由人工执行：
-            git push origin dev
-            # 若代理端口变化，先 git config http.proxy/https.proxy 指向可用代理
+```text
+Git 状态（M6.0.1 复核结论，基于实际 git 命令输出）：
 
-注意：本文档此前版本曾把 `afad064` 描述为"已提交"，那是**上一轮**的事实；
-本轮修订（上面那条本地 commit）不含在内，直到 push 成功为止。
+  远端基线      : origin/dev == 3456c7f96767ea23c59f856aca12ba50deb41699
+                  ⇒ **M6.0 修订已经推送并发布**，不是"未推送"
+  本地起点      : HEAD == 3456c7f（进入 M6.0.1 时 working tree / index 均 clean）
+  本轮（M6.0.1）: 只修改本文件 docs/phase2/M6-response-notification-adapter.md
+                  本轮**未**执行 git add / commit / push（按本轮任务约束）
+  ⇒ 本轮修订目前只存在于**工作区**，尚未提交、更未推送。
+
+本文档刻意**不**内嵌自身的未来 commit hash：任何 amend / rebase 都会让它立即过期。
+需要确认当前状态时，一律以 `git log -1 --oneline` 与 `git rev-parse origin/dev` 的实际输出为准。
+
+⚠️ 历史更正：M6.0 轮次曾因当时网络不可达而正确记录"未推送"；
+   事后 `3456c7f` 已成功推送。因此 §24 与本节同步更正，**不得**再声称 M6.0 未推送。
 ```
 
 ### 1.4 本修订对 Phase 1 的地位声明
@@ -85,21 +101,27 @@ Resume value        ：领域结果可回到调用侧
                       测试 adapter / direct invocation 验证
 ```
 
-### 2.2 本轮（M6.0）范围
+### 2.2 本轮（M6.0.1）范围
 
 ```text
-只修订本文档：解决六项设计问题、记录四个 Conflict 裁决、消除内部矛盾、
-              更新元数据与验收门禁
+只修订本文档，内容是"关闭路径与出站契约的一致性复核"，具体五处：
+  B1  AsioIOServicePool::Stop() 非幂等 → 方案 A（单一调用点 + scope guard）（§12.3）
+  B2  成员声明顺序 / 逆序析构论证更正（§12.2）
+  B3  Session sink 的 const 契约矛盾 → 收窄为 const 存活标记（§8.2）
+  B4  通知逐目标算法 + collector 所有权（§7.1 / §12.1）
+  B5  §1.3 / §24 的 Git 元数据更正（§1.3）
 ```
 
 ### 2.3 本轮明确不做
 
 ```text
 不修改任何生产代码 / 测试代码 / CMake / Phase 1 文档 / Windows 工程文件 / 其他文档
-本轮末尾按 §24 执行只读 git 命令；add/commit 由人工授权后执行
+不执行 git add / commit / push；本轮末尾只做只读 git 检查（§24）
 不创建占位 TCP message ID、不定义 Meeting wire format
 不引入第二 FIFO、第二 worker、timer 或后台线程
-不开始任何 M6 实现
+不开始 M6.1 Coding
+不自行批准 M6 Coding —— Final Coding Gate 由人工 Review 决定
+不修改 AsioIOServicePool.*（方案 A 的设计目标是零改动该 GBK 文件）
 ```
 
 ### 2.4 授权范围的唯一产物
@@ -232,13 +254,18 @@ void Send(std::string msg, short msgid);   CSession.cpp:44
 
 **(F6) `main` 的实际生命周期拓扑（本修订更正的重要事实）。**
 
+> 下面这段是**当前 HEAD（`3456c7f`）的真实代码**，用于陈述"现状"，
+> **不是** M6 的目标形态。目标形态见 §12.3.4（信号回调不再调用 `pool->Stop()`）。
+> 特别地：现状中 `pool->Stop()` 位于信号回调内，而 `Stop()` **非幂等**（§12.3.1）
+> ——这是 M6.0 设计的一处阻塞项，由 M6.0.1 的方案 A 解决。
+
 ```cpp
-// ChatServer.cpp:41-56
+// ChatServer.cpp:41-56（现状，非目标形态）
 boost::asio::io_context io_context;
 boost::asio::signal_set signals(io_context, SIGINT, SIGTERM);
 signals.async_wait([&io_context, pool, &server](auto, auto) {
     io_context.stop();
-    pool->Stop();      // 内部对每个 io_context stop + 对每个 _threads join（AsioIOServicePool.cpp:41-49）
+    pool->Stop();      // ⚠ 现状：非幂等；M6.0.1 将其移出信号回调（§12.3.3 方案 A）
     server->Shutdown();
 });
 
@@ -508,7 +535,72 @@ O-5  adapter 不向任何队列投递 work
 
 ## 7. Notification Path
 
-### 7.1 唯一路径（M6.0）
+### 7.1 唯一路径与**逐目标**处理算法（M6.0.1 修正 B4）
+
+#### 7.1.1 为什么必须逐目标
+
+`FinalizeCloseResult::notification_session_ids` 是 **0..N 个目标的集合**
+（`MeetingService.h:219`），而 `MeetingNotificationMessage` 只携带**单个**
+`notification_target_session_id`。若用一个没有明确目标的消息代表多个目标，
+或复用同一条消息多次调用 collector，则"发给谁"不可断言、"调用几次"不可断言。
+因此必须写死为**逐目标生成**。
+
+#### 7.1.2 算法（权威，Coding 必须逐句对齐）
+
+```text
+输入：const FinalizeCloseResult& result（领域已收敛：finalized / already_finalized
+                                         / snapshot 已发布 / MeetingClosed 恰好一次）
+输出：至多 N 条 MeetingNotificationMessage；每条恰好调用一次 collector_->Collect()
+
+ 0. 若 result.notification_session_ids 为空 ⇒ 直接返回（0 条消息，0 次 Collect）
+    （典型：重复 FinalizeClose 的 already_finalized 路径；MeetingService.h:217-219）
+
+ 1. directory = session_directory_.lock()
+    若 directory 为空 ⇒ directory_unavailable += 1；
+                        **整批直接返回（0 条消息，0 次 Collect）**
+
+ 2. 对 result.notification_session_ids 中的**每一个** session_id（记为 target）独立处理：
+
+    2a. handle = directory->FindSessionBySessionId(target)
+        若 handle 为空 ⇒ target_missing += 1；**跳过该 target**
+                          （不产生消息、不调用 Collect、不影响其它 target）
+
+    2b. 有效目标 ⇒ target_resolved += 1
+        构造**一条新的** MeetingNotificationMessage，并显式赋值：
+            notification_type                = EventType::MEETING_CLOSED
+            meeting_id                       = result.meeting_id
+            notification_target_session_id   = target          ← **必须是当前 target**
+            has_event_id / event_id          = 从 result.events 中取 MEETING_CLOSED
+            has_correlation_request_id /
+            correlation_request_id           = CloseContext.originating_request_id（若可得）
+
+    2c. collector_->Collect(该消息)     ← **恰好一次**，且只针对本 target
+        outbound_produced += 1
+
+ 3. 循环结束后返回（不等待、不重试、不回滚、不合并）
+```
+
+#### 7.1.3 计数守恒（可断言）
+
+```text
+设 N = result.notification_session_ids.size()
+    M = 其中 lookup 为空的个数
+则恒有：
+    target_resolved + target_missing == N
+    outbound_produced == target_resolved == 产出的 NOTIFICATION 消息条数
+    （目录不可用时例外：target_resolved == target_missing == 0，outbound_produced == 0）
+```
+
+#### 7.1.4 逐目标算法与 M6.0 的差异（明确记录）
+
+```text
+M6.0 的缺陷：把"整批 no-op"与"逐目标 skip"混在同一段叙述里，且没有规定
+             消息与 target 的绑定关系，存在"复用同一条无目标消息代表多个目标"的空间。
+M6.0.1 修正：显式规定 2a / 2b / 2c 三步，并规定 2c 的 Collect 次数 == 有效目标数。
+测试验收（§16.2 组 3）据此改写为"N 个有效目标 ⇒ N 条通知；M 个缺失 ⇒ 0 条通知"。
+```
+
+#### 7.1.5 时序图（整体）
 
 ```text
 MeetingService::FinalizeClose(meeting_id)                          MeetingService.cpp:945
@@ -518,16 +610,9 @@ LogicWorkDispatcher::DispatchWork  case FINALIZE_CLOSE             LogicWorkDisp
         │ 领域 mutation 已完成；snapshot 已发布；ENDING→CLOSED 已收敛
         ▼
 adapter_->OnFinalizeClose(result)
-        │ 1. 构造 MeetingNotificationMessage（typed，§7.2）
-        │ 2. 对 result.notification_session_ids 逐个做**lookup 判活**
+        │ weak 判活 → 逐 target：lookup → (skip | 构造单目标消息 → Collect)
         ▼
-std::weak_ptr<IMeetingSessionDirectory>::lock()
-        ├── 失败（目录已析构/未注入）⇒ 整批 no-op，计数 directory_unavailable
-        └── 成功 ⇒ directory->FindSessionBySessionId(session_id)
-                       ├── 空 ⇒ skip（计数 target_missing）
-                       └── 句柄 ⇒ 计数 target_resolved
-        ▼
-collector_->Collect(message)（typed 值对象交给唯一出站接受者）
+collector_->Collect(message)   ×  target_resolved      ← typed 值对象，绝不发送字节（§7.5）
         ▼
 （回到消费者循环；不等待、不重试、不回滚）
 ```
@@ -563,13 +648,21 @@ struct MeetingResponseMessage {
 struct MeetingNotificationMessage {
     meeting::EventType notification_type;   // 当前仅 MEETING_CLOSED
     meeting::MeetingId meeting_id;
-    meeting::SessionId notification_target_session_id;   // 单目标；多目标 = 多条消息
+
+    // **单目标**，且**必须非空**。语义见 §7.1.2 步骤 2b：
+    //   一条 MeetingNotificationMessage 只代表**一个** session。
+    //   N 个有效目标 ⇒ N 条消息 ⇒ N 次 Collect（§7.1.3 守恒式）。
+    //   禁止复用一条消息代表多个目标，也禁止把它留空后"另想办法"表达目标。
+    meeting::SessionId notification_target_session_id;
 
     bool has_event_id;
     meeting::EventId event_id;              // 来自 result.events 的 MEETING_CLOSED
     bool has_correlation_request_id;
     meeting::RequestId correlation_request_id;   // 来自 CloseContext.originating_request_id
 };
+
+// 不变式（adapter 内部必须自检，编码失败路径见 §13.2 第 4 条）：
+//   kind == NOTIFICATION ⇒ !notification.notification_target_session_id.empty()
 
 // ---- 统一出站容器 ---------------------------------------------------------
 enum class MeetingOutboundKind { RESPONSE = 0, NOTIFICATION = 1 };
@@ -611,10 +704,19 @@ public:
 
 M6 提供的两个实现：
 
-| 实现 | 使用方 | 行为 |
-| --- | --- | --- |
-| `CountingNoWireCollector` | **生产**（唯一实例） | 只计数（response/notification 各多少）、**绝不发送任何字节**、不 include `CSession.h` |
-| `RecordingMessageCollector` | **测试** | 记录全部 typed 消息，供 Layer C 逐字段断言 |
+| 实现 | 使用方 | 所有权 | 行为 |
+| --- | --- | --- | --- |
+| `CountingNoWireCollector` | **生产**（唯一实例） | `LogicSystem::_outbound_collector`（`unique_ptr` 成员，§12.1） | 只计数（response/notification 各多少）、**绝不发送任何字节**、不 include `CSession.h` |
+| `RecordingMessageCollector` | **测试** | 测试夹具（`LogicWorkDispatcher` 的所有者作用域内） | 记录全部 typed 消息，供 Layer C 逐字段断言 |
+
+```text
+生命周期硬约束（对应 B4 / R-13）：
+  collector 的生命周期必须 ⊇ adapter 的生命周期。
+  ✗ 禁止：在 EnsureWorkQueueStarted() 内建局部 collector 再把引用交给 adapter
+          （call_once 结束时局部对象析构 ⇒ adapter 持悬垂引用）
+  ✓ 要求：collector 为 LogicSystem 的 unique_ptr 成员，且声明在 adapter **之前**
+          （逆序析构 ⇒ adapter 先于 collector 销毁，§12.2.3）
+```
 
 > **关键**：生产 collector **不**调用 `CSession::Send`，因此 M6 生产链路
 > **不存在任何占位/伪造的 msgid**。真实字节传输由 Phase 3 的 wire adapter 实现新的
@@ -660,17 +762,54 @@ M6 生产侧：OnFinalizeClose 会被真实调用、会真实执行 lookup 判�
         无法补救调用前就发生的悬垂。
 ```
 
-### 8.2 新设计：weak 判活 + shared 强句柄
+### 8.2 新设计：weak 判活 + shared 强句柄 + **const-correct 存活标记**
+
+#### 8.2.1 先修正 M6.0 的契约矛盾（B3）
+
+M6.0 同时写了两件互相矛盾的事：
+
+```text
+lookup 返回 std::shared_ptr<const IMeetingOutboundSink>   ← 只读句柄
+IMeetingOutboundSink::AcceptMeetingOutbound(...) 是**非 const** 方法          ← 需要对只读句柄调用
+```
+
+二者不可能同时成立：经 `shared_ptr<const T>` 无法调用 `T` 的非 const 成员。
+该矛盾必须二选一。
+
+**裁决：M6 只需要"目标是否存活"，不需要"发送能力"。因此把接口收窄为 const-correct 的存活标记。**
+
+```text
+理由：
+1. M6 的生产 collector **不发送任何字节**（§7.3 / §7.5）。若现在定义一个"可发送"的
+   非 const 接口，M6 内部将没有任何合法调用者 —— 那是一个只能靠 Phase 3 才有意义的死接口，
+   而且会诱导后人为了让编译通过而真的去发送；
+2. 存活标记的语义与 M6 的真实职责完全一致：**逐目标判活并计数**（§7.1 / §9.1）；
+3. Phase 3 需要真正的发送能力时，**新增**一个派生接口即可（§8.2.4），
+   不需要修改本标记、也不需要在本轮为它设计协议。
+```
+
+#### 8.2.2 接口定义（const-correct）
 
 ```cpp
 // MeetingOutboundChannel.h（新头；只含 <memory> / <string>）
-class IMeetingOutboundSink {
+//
+// IMeetingLiveSession = 「某条当前存活的会话」的**只读存活标记**。
+//
+// 它刻意**不**提供任何发送方法：
+//   - M6 的生产路径不发送字节（§7.5）；
+//   - 因此不存在"定义了发送能力却永远不可调用"的死接口；
+//   - 且所有方法均为 const ⇒ 与 shared_ptr<const IMeetingLiveSession> 契约一致。
+//
+// 它的存在价值（可断言、可测试）：
+//   - 证明 lookup 返回的是**生命周期受控**的强句柄（§8.3）；
+//   - 给 adapter 一个稳定的"目标已解析"证据，用于 resolved / missing 计数；
+//   - Phase 3 的发送接口可基于它派生（§8.2.4）。
+class IMeetingLiveSession {
 public:
-    virtual ~IMeetingOutboundSink() {}
-    // 注意：M6 的**生产**路径**不调用**它。它存在的理由是：
-    //   - Phase 3 的 wire adapter 需要一个"已判活的会话目标"类型，其生命周期必须由 lookup 保证；
-    //   - M6 阶段仅用于 session lookup 的可观测性验证（resolved / missing）。
-    virtual void AcceptMeetingOutbound(const MeetingOutboundMessage& message) = 0;
+    virtual ~IMeetingLiveSession() {}
+
+    // 该会话的稳定标识（值拷贝）。**只读**，用于日志与测试断言。
+    virtual std::string DescribeSessionId() const = 0;
 };
 
 class IMeetingSessionDirectory {
@@ -678,29 +817,60 @@ public:
     virtual ~IMeetingSessionDirectory() {}
 
     // 非拥有、线程安全、**生命周期受控**：
-    //   - 成功 ⇒ 返回 shared_ptr，调用期间目标**必然存活**（强引用由该句柄持有）
+    //   - 成功 ⇒ 返回非空 shared_ptr，句柄存活期间目标**必然存活**（强引用由句柄持有）
     //   - 失败 ⇒ 返回空 shared_ptr（目标不存在或已移除）
     // 实现方必须在自己的互斥下从"持有 shared_ptr 的注册表"中**复制**该 shared_ptr；
     // **禁止**用裸指针构造 shared_ptr（会建立第二个控制块 ⇒ 未定义行为）。
-    virtual std::shared_ptr<const IMeetingOutboundSink>
+    virtual std::shared_ptr<const IMeetingLiveSession>
         FindSessionBySessionId(const std::string& session_id) = 0;
 };
 ```
 
-`CServer` 的实现要点：
+`CServer` 的实现要点（`CSession` 实现 `IMeetingLiveSession`）：
 
 ```cpp
-std::shared_ptr<const IMeetingOutboundSink>
+std::shared_ptr<const IMeetingLiveSession>
 CServer::FindSessionBySessionId(const std::string& session_id) {
         std::lock_guard<std::mutex> lock(_mutex);      // ← 必须在 _mutex 下 find（§8.5）
         std::map<std::string, std::shared_ptr<CSession>>::iterator it = _sessions.find(session_id);
         if (it == _sessions.end()) {
-                return std::shared_ptr<const IMeetingOutboundSink>();
+                return std::shared_ptr<const IMeetingLiveSession>();
         }
-        // it->second 是 shared_ptr<CSession>（F4）；CSession 实现 IMeetingOutboundSink。
+        // it->second 是 shared_ptr<CSession>（F4）；CSession 实现 IMeetingLiveSession。
         // **复制** shared_ptr ⇒ 引用计数 +1 ⇒ 语句结束后目标仍存活。
+        // 隐式向上转换到 shared_ptr<const IMeetingLiveSession>。
         return it->second;
 }
+```
+
+#### 8.2.3 const 一致性核对（Review gate）
+
+```text
+✅ IMeetingLiveSession 的**全部**成员函数均为 const
+✅ lookup 返回 shared_ptr<const IMeetingLiveSession>
+✅ adapter 只调用 const 成员（DescribeSessionId）⇒ 编译期合法
+✅ adapter 从不发送：本接口根本没有发送方法
+✅ CSession 实现该接口只需一个 const 方法；**不需要**改动 CSession 的既有发送语义
+```
+
+#### 8.2.4 Phase 3 如何接入真正的发送能力（不改本轮接口）
+
+```text
+Phase 3 的 wire adapter 需要一个"能接收 typed 消息"的会话能力，接入方式（择一，届时裁决）：
+
+  方案 P1（派生接口，推荐）：
+      class IMeetingOutboundSink : public IMeetingLiveSession {
+      public:
+          virtual void AcceptMeetingOutbound(const MeetingOutboundMessage&) = 0;   // 非 const
+      };
+      CSession 同时实现 IMeetingOutboundSink；
+      directory 另增一个返回 shared_ptr<IMeetingOutboundSink> 的查询（或把返回类型收紧）。
+
+  方案 P2（并列接口）：
+      CSession 额外实现 IMeetingOutboundSink；directory 增一个并列查询方法。
+
+两者都是**纯新增**，不需要修改 IMeetingLiveSession 或 M6 的任何 adapter 代码。
+⇒ 本轮把"存活标记"与"发送能力"解耦，不给 M6 留下死接口，也不预占 Phase 3 的协议设计。
 ```
 
 ### 8.3 所有权证明（逐条）
@@ -708,12 +878,13 @@ CServer::FindSessionBySessionId(const std::string& session_id) {
 | 待证明 | 证明 |
 | --- | --- |
 | lookup 在 `_mutex` 下完成 | 实现第一行即 `lock_guard(_mutex)`；`find` 与 `shared_ptr` 复制都在临界区内 |
-| 不暴露可变注册表 | 返回类型 `shared_ptr<const IMeetingOutboundSink>`；该接口无任何返回容器/引用的方法；调用方无法增删会话 |
+| 不暴露可变注册表 | 返回类型 `shared_ptr<const IMeetingLiveSession>`；该接口只有 const 方法（`DescribeSessionId()`），既不返回容器也不返回引用；调用方无法增删会话、无法发送 |
 | adapter 不依赖 `CServer`/`CSession` 具体类型 | 接口头只含 `<memory>`/`<string>`；实现细节封在 `CServer.cpp` |
 | 不违反 Meeting Domain 所有权边界 | 目录接口只出现在 adapter 与 `CServer` 之间；`meeting/*` 零 include、零引用 |
 | 不声称 `SharedSelf()` 补救悬垂 | 本设计**不依赖**它；生命周期由 `shared_ptr` 复制本身保证。`SharedSelf()` 只在 `async_write` 期间保活（既有语义），与本保障无关 |
-| 强引用不会导致"复活"/泄漏 | 句柄只在一次 `OnFinalizeClose` 处理期间存活（局部变量），**不**把 Session 重新插入 `_sessions`，也不阻止 `Close()`；被移除后仍存活只是延迟析构，不是语义复活 |
+| 强引用不会导致"复活"/泄漏 | 句柄只在单个目标的处理期间存活（局部变量），**不**把 Session 重新插入 `_sessions`，也不阻止 `Close()`；被移除后仍存活只是延迟析构，不是语义复活 |
 | 不存在"从裸指针造 shared_ptr" | 显式禁止；唯一来源是 `_sessions` 中既有的 `shared_ptr`（§8.6） |
+| const 契约自洽 | 见 §8.2.3：接口全 const、句柄 const、无发送方法 ⇒ 无"可定义不可调用"的接口 |
 
 ### 8.4 目录本身的生命周期：`weak_ptr` 判活
 
@@ -773,7 +944,8 @@ M6 **不**修 CServer::ClearSession 的既有"find 未持锁"缺陷（CServer.cp
 | 情形 | 处理 | 依据 |
 | --- | --- | --- |
 | Session 不存在 | 跳过（best-effort），计 `target_missing` | §15.4 |
-| 目录不可用（`weak_ptr` lock 失败） | 整批 no-op，计 `directory_unavailable` | §8.4（M6.0 新增） |
+| 目录不可用（`weak_ptr` lock 失败） | **整批** no-op（0 条消息 / 0 次 Collect），计 `directory_unavailable` | §7.1.2 步骤 1 / §8.4 |
+| 单个目标缺失 | **仅跳过该目标**（其余目标照常处理），计 `target_missing` | §7.1.2 步骤 2a |
 | 目标在关闭过程中消失 | 不影响 `ENDING → CLOSED` 收敛 | §15.4 / §16.1 |
 | 出站消息产出失败（不可达分支） | 计 `encoding_failed`，不抛 | §13 |
 | ACK / retry / 死信 | **不存在** | §15.4 |
@@ -928,100 +1100,291 @@ response 的延迟发送 / 合并
 
 ---
 
-## 12. Ownership / Lifetime（M6.0 重做：关闭顺序）
+## 12. Ownership / Lifetime（M6.0.1 重做：所有权拓扑与关闭顺序）
 
-### 12.1 生产 ownership 图
+### 12.1 生产 ownership 拓扑（含 collector 归属，修正 B4）
 
 ```text
-ChatServer.cpp（composition root）
+ChatServer.cpp（composition root，main 线程）
   └── auto server = std::make_shared<CServer>(io_context, port)      ← §12.4 改为 shared
         ├── _sessions : std::map<std::string, std::shared_ptr<CSession>>
         ├── 实现 IMeetingSessionDirectory（FindSessionBySessionId，§8.2）
         └── 构造后、io_context.run() 前：
               LogicSystem::GetInstance()->SetMeetingSessionDirectory(server)
 
-LogicSystem（Singleton）
-  ├── _dispatcher : unique_ptr<LogicWorkDispatcher>            ← 惰性构造（EnsureWorkQueueStarted）
-  ├── _meeting_adapter : unique_ptr<MeetingResponseNotificationAdapter>   ← M6 新增
-  │     ├── IMeetingOutboundMessageCollector&  → CountingNoWireCollector（生产）
-  │     └── weak_ptr<IMeetingSessionDirectory> → 指向 CServer（判活，不拥有）
-  └── _work_executor : unique_ptr<SerializedWorkExecutor<LogicWorkDispatcher>>
+LogicSystem（Singleton）—— **全部四个对象都由它拥有**
+  ├── _outbound_collector  : unique_ptr<CountingNoWireCollector>        ← M6 新增，**必须**是成员
+  ├── _meeting_adapter     : unique_ptr<MeetingResponseNotificationAdapter>   ← M6 新增
+  │     ├── IMeetingOutboundMessageCollector&  → *_outbound_collector   （**非拥有引用**）
+  │     └── weak_ptr<IMeetingSessionDirectory> → CServer（判活，不拥有）
+  ├── _dispatcher          : unique_ptr<LogicWorkDispatcher>            ← 惰性构造
+  │     └── IMeetingResponseNotificationAdapter* → *_meeting_adapter    （**非拥有指针**）
+  └── _work_executor       : unique_ptr<SerializedWorkExecutor<LogicWorkDispatcher>>
+        ├── THandler& handler_          → *_dispatcher                  （**非拥有引用**）
+        └── has-a LogicWorkQueue queue_ + std::thread worker_
 ```
 
-### 12.2 为什么 adapter 与 dispatcher 必须在同一个 `call_once` 内构造
-
-`LogicWorkDispatcher` 的构造需要 `IMeetingResponseNotificationAdapter*`；
-adapter 需要 collector 与 weak 目录。三者都在 `EnsureWorkQueueStarted()` 的
-`std::call_once` 内一次性建立，保证：
+**collector 的归属裁决（B4 的第二个问题）**：
 
 ```text
-1. adapter 生命周期 ⊆ dispatcher 生命周期 ⊆ LogicSystem 生命周期
-2. dispatcher 析构时 worker 已 StopAndJoin ⇒ adapter 不可能在消费者仍运行时被销毁
-3. member 声明顺序必须为：_meeting_adapter → _work_executor → _dispatcher
-   （C++ 逆序析构 ⇒ worker 先停，再销毁 adapter，最后销毁 dispatcher）
-4. 不需要为 adapter 引入任何锁或引用计数
+裁决：CountingNoWireCollector 由 LogicSystem 以 unique_ptr 成员**独占拥有**，
+      adapter 只持有一个**非拥有引用**。
+
+禁止做法（M6.0 的隐含风险）：
+  ✗ 在 EnsureWorkQueueStarted() 内创建局部 CountingNoWireCollector，
+    再把引用交给 adapter —— 该局部对象在 call_once 结束时即析构，
+    adapter 随后持有的是**悬垂引用**（典型"代码能编译、运行时 UB"）。
+
+为什么必须是成员而不是 adapter 的成员：
+  ✓ 若 collector 作为 adapter 的 value 成员，adapter 析构时它会先于 adapter 的
+    其它成员/基类销毁次序产生额外约束，且 Phase 3 可能希望把真实 collector
+    独立替换/共享 —— 放在 LogicSystem 层使"谁拥有出站汇点"一目了然；
+  ✓ 由 LogicSystem 拥有 ⇒ 其生命周期严格覆盖 adapter（§12.2 的声明顺序保证）。
+
+生命周期要求（可静态核对）：
+  collector 的生命周期 ⊇ adapter 的生命周期
+  ⇒ 声明顺序上 collector 必须**先于** adapter（逆序析构时 adapter 先销毁）。
 ```
 
-### 12.3 关闭顺序（M6.0 核心新增：显式 ShutdownWorkExecutor）
+### 12.2 成员声明顺序与逆序析构证明（修正 B2）
 
-**问题（F6-a）**：`CServer` 是 `main` 的局部对象，`LogicSystem` 是 Singleton；
-后者的析构（也是目前唯一的 `StopAndJoin` 时机）**晚于** `CServer` 析构。
-因此在现有代码下，"worker 生命周期 ⊆ io_context.run() 期间"**不成立**，
-初版据此推出的"目录借用安全"是错的。
+#### 12.2.1 M6.0 的错误
 
-**M6.0 裁决：在 `main` 中显式停止并 join 唯一 executor，顺序不可交换。**
+M6.0 §12.2 写作：
 
-```cpp
-// ChatServer.cpp —— M6 目标形态（示意；Coding 时以实际为准）
-auto server = std::make_shared<CServer>(io_context, atoi(port_str.c_str()));
-LogicSystem::GetInstance()->SetMeetingSessionDirectory(server);   // §12.5 时序
-
-io_context.run();
-
-// ---- 关闭序列（顺序不可交换）------------------------------------------
-pool->Stop();          // 1. 幂等；确保 AsioIOServicePool 线程全部 join
-                       //    ⇒ 之后不可能再有网络回调执行（F6-b）
-LogicSystem::GetInstance()->ShutdownWorkExecutor();   // 2. RequestStop + join；
-                       //    drain 已受理 work（含 Close→FinalizeClose）
-                       //    此时 server 仍存活 ⇒ 目录 lookup 仍可用
-LogicSystem::GetInstance()->ClearMeetingSessionDirectory();   // 3. 断开目录引用
-                       //    （weak 语义下即使漏掉也只会 no-op；显式化以利可观测）
-RedisMgr::GetInstance()->HDel(LOGIN_COUNT, server_name);       // 4. Redis 关闭之前
-RedisMgr::GetInstance()->Close();
-grpc_server_thread.join();
-// 5. server 与 io_context 在此之后才析构
+```text
+"member 声明顺序必须为：_meeting_adapter → _work_executor → _dispatcher
+ （C++ 逆序析构 ⇒ worker 先停，再销毁 adapter，最后销毁 dispatcher）"
 ```
 
-**为什么必须是这个顺序（逐条）**：
+该说明**自相矛盾**：若声明为 `_meeting_adapter → _work_executor → _dispatcher`，
+则逆序析构是 `_dispatcher → _work_executor → _meeting_adapter`，
+即 **dispatcher 先于 executor 被销毁** —— 而 executor 的 `handler_` 引用正指向 dispatcher。
+这会把"先停 worker、再拆依赖"的意图**反过来**。
 
-| # | 步骤 | 为什么必须在这 |
-| --- | --- | --- |
-| 1 | `pool->Stop()` | `~CSession` / 读回调 / `ClearSession` 都在 pool 线程上跑。`Stop()` 内部对每个 io_context `stop()` 并对每个 `_threads` `join()`（`AsioIOServicePool.cpp:41-49`）⇒ 返回后**网络生产者已全部停止**，drain 期间不会再有新入队 |
-| 2 | `ShutdownWorkExecutor()` | 必须在 `server` 析构之前：drain 期间 `FINALIZE_CLOSE` 仍可能触发 `OnFinalizeClose`，其 lookup 需要存活的目录。也必须在 Redis 关闭之前（Step 2.4 的 runtime smoke 要求 Redis 注册清理在正常退出前完成） |
-| 3 | `ClearMeetingSessionDirectory()` | 解除 adapter 对目录的引用。weak 语义下这是"显式化 + 可观测"，而非正确性所必需 |
-| 4 | Redis 关闭 | 既有顺序，不变 |
-| 5 | `server` / `io_context` 析构 | 此时已无任何线程会使用它们 |
+#### 12.2.2 正确约束（从依赖关系推导，而不是从偏好推导）
 
-**重复 `StopAndJoin()` 的行为（必须核对，已在代码中确认）**：
+```text
+依赖事实（均已在代码中核实）：
+  D1  executor 持有 dispatcher 的引用：THandler& handler_（LogicWorkDispatcher.h:575），
+      构造期绑定（LogicWorkDispatcher.h:284-285），并在 DispatchOutsideLock 中
+      调用 handler_.DispatchWork(...)（LogicWorkDispatcher.h:555）。
+  D2  executor 的 worker 线程体**解引用** handler_ 与 legacy_router_
+      （LogicWorkDispatcher.h:551-555），因此 worker 存活期间二者必须存活。
+  D3  dispatcher 持有 adapter 的非拥有指针（M6 新增），并在每个 Dispatch* 中调用它。
+  D4  adapter 持有 collector 的非拥有引用（§12.1）。
+  ⇒ 存活条件：collector ⊇ adapter ⊇ dispatcher ⊇ executor 的 worker
+  ⇒ 销毁条件（逆序）：executor(worker 已停) → dispatcher → adapter → collector
+```
+
+#### 12.2.3 结论：声明顺序与析构顺序
 
 ```cpp
-// LogicWorkDispatcher.h:409-416
-void StopAndJoin() {
-    ReleaseGate();
-    queue_.RequestStop();                                        // 幂等：只置标志 + notify_all
-    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
-        worker_.join();
-    }
+// LogicSystem.h —— 声明顺序（**必须**与此一致）
+std::unique_ptr<CountingNoWireCollector>                        _outbound_collector;    // 1
+std::unique_ptr<MeetingResponseNotificationAdapter>             _meeting_adapter;       // 2
+std::unique_ptr<LogicWorkDispatcher>                            _dispatcher;            // 3
+std::unique_ptr<SerializedWorkExecutor<LogicWorkDispatcher>>    _work_executor;         // 4
+```
+
+```text
+声明顺序 : _outbound_collector → _meeting_adapter → _dispatcher → _work_executor
+逆序析构 : _work_executor → _dispatcher → _meeting_adapter → _outbound_collector
+                     ↑                ↑              ↑                    ↑
+              worker 先被 join    随后销毁        随后销毁            最后销毁
+```
+
+**注意**：现有 `LogicSystem.h` 的声明顺序是 `_work_executor` 在前、`_dispatcher` 在后
+（`LogicSystem.h:90` 与 `:94`），即逆序析构时 dispatcher 先于 executor 销毁。
+当前之所以没有出问题，是因为 `~LogicSystem` **显式**先调用
+`_work_executor->StopAndJoin()`（`LogicSystem.cpp:496-504`），
+把 worker 在**任何成员析构之前**就 join 掉了。M6.0.1 要求把声明顺序也调整到与
+依赖一致，使"即使显式调用被误删"也不至于立刻 UB（防御性，但不替代显式停止）。
+
+#### 12.2.4 显式停止不可被析构顺序替代（硬约束）
+
+```text
+⚠️ 声明顺序只解决"析构时不访问已销毁对象"，**不**解决"线程何时停止"。
+   worker 的停止必须由**显式调用** StopAndJoin() / ShutdownWorkExecutor() 完成：
+     - main 中在 io_context.run() 返回后显式调用（§12.3 的必需路径）；
+     - ~LogicSystem 中的兜底调用（既有）。
+   二者都不可省略，也不可互相替代。
+   理由：若只依赖逆序析构，则 worker 会一直运行到 ~LogicSystem 真正开始析构，
+        而那时 CServer 早已销毁 ⇒ §12.3 的时序保证失效。
+```
+
+#### 12.2.5 为什么三者必须在同一个 `call_once` 内构造
+
+`LogicWorkDispatcher` 的构造需要 `IMeetingResponseNotificationAdapter*`；
+adapter 需要 collector 引用与 weak 目录。四者都在 `EnsureWorkQueueStarted()` 的
+`std::call_once` 内一次性装配，保证：
+
+```text
+1. 装配顺序（构造，与声明顺序一致，因为初始化列表按声明顺序执行）：
+     _outbound_collector → _meeting_adapter → _dispatcher → _work_executor
+   ⇒ adapter 构造时 collector 已存在；dispatcher 构造时 adapter 已存在；
+     executor 构造时 dispatcher 已存在（且其构造函数会 SetWorkQueue /
+     SetInternalWorkSink 并启动 worker 线程）
+2. 生命周期：collector ⊇ adapter ⊇ dispatcher ⊇ executor
+3. 不需要为 collector / adapter 引入任何锁或引用计数（单线程装配，#12.5 保证可见性）
+```
+
+### 12.3 关闭路径（M6.0.1 核心修正 B1：`Stop()` 非幂等）
+
+#### 12.3.1 事实：`AsioIOServicePool::Stop()` **不是**幂等的
+
+```cpp
+// AsioIOServicePool.cpp:32-45（GBK 源文件，此处为 UTF-8 视图；行号取自原文）
+void AsioIOServicePool::Stop() {
+        for (auto& work : _works) {
+                work->get_executor().context().stop();   // ← 解引用 unique_ptr
+                work.reset();                           // ← 置空
+        }
+        for (auto& t : _threads) {
+                t.join();                               // ← 无条件 join
+        }
 }
 ```
 
 ```text
-⇒ 可重复调用：RequestStop 幂等；join 前检查 joinable()，join 后变为非 joinable
-⇒ 不会自我 join（get_id() != this_thread::get_id() 守卫）
-⇒ 因此 main 里显式调用一次、~LogicSystem 再调用一次，是安全的（析构里第二次为 no-op）
+⇒ 第二次调用会在第一个循环的第一步 `work->get_executor()` 解引用**已置空的
+  unique_ptr**（`_works[i]` 此时为 nullptr）⇒ 未定义行为。
+⇒ 即便第一循环侥幸越过，第二个循环的 `t.join()` 对**已 join 过的 thread**
+  会抛 std::system_error（invalid argument，EDEADLK/ESRCH 类）。
+⇒ 结论：**`Stop()` 必须恰好调用一次**。本设计不得、也不再声称它"幂等"。
+
+补充事实（本轮已核实）：
+  boost::asio::executor_work_guard **没有默认构造函数**
+  （unique_ptr 置空后 `_works[i]` 变为 nullptr；不存在"默认构造的 Work 可被安全解引用"这一退路）。
 ```
 
-**Join 期间不会再有新 work 的证据**：
+#### 12.3.2 另一个必须同时解决的问题：信号回调不能自己 `Stop()`
+
+现有代码把 `pool->Stop()` 放在信号回调里（`ChatServer.cpp:43-47`）。
+该回调**运行在 AsioIOServicePool 的某个 io_context 线程上**（信号 set 绑定的是
+主 `io_context`，但主 io_context 由 `io_context.run()` 在 main 线程驱动；
+而 session 的 socket 用的是 pool 的 io_context）。无论具体落在哪个线程，
+`Stop()` 内部的 `t.join()` 都可能**join 当前线程自身**，那是必然的死锁/异常。
+
+#### 12.3.3 裁决：**方案 A（单一 Stop 调用点 + scope guard）**
+
+```text
+采用方案 A：
+  ✓ 移除信号回调中的 pool->Stop()；
+  ✓ 仅在 io_context.run() 返回之后的**受控清理路径**中调用一次 pool->Stop()；
+  ✓ 用 scope guard 保证 run() 抛异常时仍然执行清理；
+  ✓ 不修改 AsioIOServicePool.*（GBK 文件零改动，避免转码风险）
+
+为什么不采用方案 B（把 Stop() 幂等化）：
+  ✗ 需要修改 GBK 编码的 AsioIOServicePool.h/.cpp（转码或字节级编辑风险）；
+  ✗ 需要新增"已停止"状态位，并给 _works / _threads 加入状态机；
+  ✗ 幂等化只掩盖"多处调用"的设计问题，而单一调用点能从结构上消除它。
+  ⇒ 方案 A 更小、更安全、且不需要扩大 Scope Matrix。
+```
+
+#### 12.3.4 目标形态（`ChatServer.cpp`）
+
+```cpp
+auto server = std::make_shared<CServer>(io_context, atoi(port_str.c_str()));
+LogicSystem::GetInstance()->SetMeetingSessionDirectory(server);   // §12.5 时序：早于 worker 创建
+
+// 关闭清理的 scope guard：保证 run() 正常返回或抛异常都会执行
+struct ShutdownGuard {
+    AsioIOServicePool*                  pool;
+    LogicSystem*                        logic;
+    std::function<void()>               on_leave;
+    ~ShutdownGuard() {
+        // 1) 先停网络生产者（**恰好一次**）
+        if (pool != nullptr) { pool->Stop(); }
+        // 2) 再停并 drain 唯一 work executor
+        if (logic != nullptr) { logic->ShutdownWorkExecutor(); }
+        // 3) 解除目录引用（weak 语义下即使漏掉也只会 no-op）
+        if (logic != nullptr) { logic->ClearMeetingSessionDirectory(); }
+        if (on_leave) { on_leave(); }
+    }
+};
+
+// 信号回调：**只**停止主 io_context 与 gRPC，不碰 pool->Stop()
+signals.async_wait([&io_context, &server](auto, auto) {
+    io_context.stop();          // 让 run() 返回
+    server->Shutdown();         // gRPC
+});
+
+{
+    ShutdownGuard guard{ pool.get(), LogicSystem::GetInstance().get(), nullptr };
+    io_context.run();           // 正常返回或抛异常，guard 都会执行清理
+}
+// guard 已析构 ⇒ 网络已停、worker 已 join、目录引用已解除
+// 之后：Redis HDel / Close、grpc_server_thread.join()
+// 最后：server 与 io_context 才析构
+```
+
+> 说明：`ShutdownGuard` 是**示意**，Coding 时可用 `std::unique_ptr` + custom deleter
+> 或局部 RAII 类实现；**不引入**任何新依赖、线程或 timer。
+> `pool` 是 `AsioIOServicePool::GetInstance()` 返回的 `shared_ptr`（`ChatServer.cpp:21`），
+> guard 只持有裸指针或 `shared_ptr` 拷贝，不影响单例生命周期。
+
+#### 12.3.5 关闭顺序（不可交换）与各项保证
+
+| # | 步骤 | 位置 | 保证 |
+| --- | --- | --- | --- |
+| 0 | `io_context.stop()` + `server->Shutdown()` | 信号回调 | 令 `run()` 返回；gRPC 开始关闭。**不**调用 `pool->Stop()` |
+| 1 | `pool->Stop()` | guard（`run()` 之后、`server` 析构之前） | **恰好一次**；对每个 pool io_context `stop()` 并 join 全部 `_threads` ⇒ 网络生产者停止（F6-b） |
+| 2 | `LogicSystem::ShutdownWorkExecutor()` | guard | `RequestStop()` + `join()`，drain 已受理 work（含 `Close → FINALIZE_CLOSE`）。**此时 `server` 仍存活** ⇒ 目录 lookup 仍可用 |
+| 3 | `LogicSystem::ClearMeetingSessionDirectory()` | guard | 解除 adapter 对目录的引用 |
+| 4 | Redis `HDel` / `Close` | `main` | 既有顺序，不变 |
+| 5 | `server` / `io_context` 析构 | `main` 作用域结束 | 此时已无线程会使用它们（worker 已 join、pool 线程已 join） |
+
+**对照需求的五项保证**：
+
+```text
+(1) 网络生产者停止          ⇒ 步骤 1（pool->Stop() 单次）
+(2) executor 停止接受并 drain ⇒ 步骤 2（StopAndJoin 语义，LogicWorkDispatcher.h:409-416）
+(3) Close → FINALIZE_CLOSE 完成
+      ⇒ drain 语义：stop 后先排空队列再退出（M4 §11.1）；
+        消费者是唯一可走 PushInternalDuringDrainLocked 的线程（M4 §11.2）
+(4) adapter 与 directory 在 drain 期间有效
+      ⇒ 步骤 2 早于步骤 3，且步骤 2/3 都早于 server 析构；
+        另有 weak_ptr 兜底（§8.4）
+(5) worker 已 join 后才允许 CServer 析构
+      ⇒ 步骤 2 在 guard 内完成，guard 在 server 之前析构/离开作用域（§12.3.4）
+```
+
+#### 12.3.6 `run()` 异常退出时的清理策略（必须明确）
+
+```text
+问：若注册的 handler 抛出未捕获异常，run() 会向调用方传播；此时清理还发生吗？
+答：会 —— guard 在栈展开时析构，因此步骤 1/2/3 仍会执行。
+
+顺序仍然正确：
+  run() 抛异常 ⇒ 栈展开开始 ⇒ **此时 server 仍未析构**（它是同一作用域内的局部对象）
+  ⇒ guard 析构 ⇒ pool->Stop()（网络停止）⇒ ShutdownWorkExecutor()（drain）
+  ⇒ ClearMeetingSessionDirectory() ⇒ 然后 server / io_context 才析构。
+⇒ 与正常路径的顺序完全一致；不存在"异常路径跳过 drain"的漏洞。
+
+若异常发生在 guard 构造**之前**（例如 CServer 构造失败 / SetMeetingSessionDirectory 失败）：
+  此时 worker 尚未创建（EnsureWorkQueueStarted 尚未被调用），
+  ~LogicSystem 的兜底 StopAndJoin 为 no-op；pool 由既有的静态析构路径回收。
+  该路径不在 M6 的责任范围，M6 不改变它。
+```
+
+#### 12.3.7 重复调用的行为（逐项，全部已核实）
+
+```text
+pool->Stop()                        : **不可重复**（§12.3.1）。本设计保证恰好一次。
+                                      "恰好一次"由结构保证：唯一调用点在 guard 内，
+                                      而 guard 在其作用域内只析构一次。
+SerializedWorkExecutor::StopAndJoin(): **可重复**。
+                                      LogicWorkDispatcher.h:409-416：
+                                        RequestStop() 幂等（只置标志 + notify_all）
+                                        if (worker_.joinable() && get_id() != this_thread) join()
+                                      ⇒ main 显式调用一次 + ~LogicSystem 兜底一次，安全。
+CMeeting...::ShutdownWorkExecutor()   : 幂等包装（内部置位 + 调用 StopAndJoin），
+                                      第二次调用直接返回。
+ClearMeetingSessionDirectory()        : 幂等（置空 weak_ptr；重复置空无副作用）。
+```
+
+#### 12.3.8 Join 期间不会再有新 work 的证据
 
 ```text
 (a) pool->Stop() 已 join 全部网络线程 ⇒ HandleAccept / 读回调 / ClearSession 不再执行
@@ -1029,6 +1392,7 @@ void StopAndJoin() {
     一律返回 false（M4 §11.2）⇒ 拒绝，不进入队列
 (c) 消费者线程是唯一能走的 drain 例外（PushInternalDuringDrainLocked），
     用于补完已受理工作的必要后续（Close→FinalizeClose）
+(d) REGISTER / AUTHENTICATE / MEETING_COMMAND 都走 Post* 入口 ⇒ 均受 (b) 约束
 ```
 
 ### 12.4 `CServer` 改为 `shared_ptr` 的必要性与风险
@@ -1057,9 +1421,12 @@ SetMeetingSessionDirectory(server)         ← 写入 LogicSystem（线程尚不
 io_context.run()                           ← 之后才可能 HandleAccept
                                                        EnsureWorkQueueStarted()
                                                          call_once: 读目录（已写）
-                                                         new LogicWorkDispatcher(..., adapter)
-                                                         new SerializedWorkExecutor(...)
-                                                           └── std::thread 启动 ← happens-before
+                                                         装配（顺序 == 声明顺序，§12.2.3）：
+                                                           new CountingNoWireCollector
+                                                           new MeetingResponseNotificationAdapter(collector, weak 目录)
+                                                           new LogicWorkDispatcher(..., adapter)
+                                                           new SerializedWorkExecutor(...)
+                                                             └── std::thread 启动 ← happens-before
 ```
 
 **顺序 + 可见性 + 幂等 三重保证**：
@@ -1083,7 +1450,7 @@ io_context.run()                           ← 之后才可能 HandleAccept
 | --- | --- | --- | --- |
 | `IMeetingResponseNotificationAdapter*` | `LogicSystem::_meeting_adapter` | dispatcher | adapter ⊆ dispatcher ⊆ LogicSystem；worker 先 join |
 | `weak_ptr<IMeetingSessionDirectory>` | 不拥有（`CServer` 由 `main` 的 `shared_ptr` 拥有） | adapter | `lock()` 判活；失败 ⇒ no-op，**不会悬垂** |
-| `shared_ptr<const IMeetingOutboundSink>` | `CServer::_sessions` | adapter（**仅在一次 OnFinalizeClose 处理期间**） | 从注册表复制 ⇒ 处理期间目标必然存活；局部变量结束后释放 |
+| `shared_ptr<const IMeetingLiveSession>` | `CServer::_sessions` | adapter（**仅在单个目标的处理期间**） | 从注册表复制 ⇒ 处理期间目标必然存活；逐目标局部变量，该目标处理完即释放 |
 | `IMeetingOutboundMessageCollector*` | `LogicSystem::_meeting_adapter` | adapter | 同 adapter 生命周期 |
 
 ---
@@ -1212,7 +1579,7 @@ CB-R6  handling_chat_server_id 必须等于 local_server_id，否则领域返回
 | 文件 | 修改内容 | 依据 |
 | --- | --- | --- |
 | `MeetingOutboundMessage.h`（**新增**） | `MeetingResponseMessage` / `MeetingNotificationMessage` / `MeetingOutboundMessage`（typed 值对象） | §7.2 |
-| `MeetingOutboundChannel.h`（**新增**） | `IMeetingOutboundSink`、`IMeetingSessionDirectory`、`IMeetingOutboundMessageCollector`（仅 `<memory>`/`<string>`） | §7.3 / §8.2 |
+| `MeetingOutboundChannel.h`（**新增**） | `IMeetingLiveSession`（const 存活标记）、`IMeetingSessionDirectory`、`IMeetingOutboundMessageCollector`（仅 `<memory>`/`<string>`） | §7.3 / §8.2 |
 | `MeetingRequestContextBuilder.h`（**新增**） | builder 声明 + inline 实现（纯函数） | §14 |
 | `MeetingResponseNotificationAdapter.h`（**新增**） | `IMeetingResponseNotificationAdapter` + 生产 adapter 声明 + 只读计数 | §6.4 / §8.4 |
 | `MeetingResponseNotificationAdapter.cpp`（**新增**） | 编码、安全矩阵、weak 判活、best-effort、noexcept 边界、计数 | §6 / §7 / §9 / §10 / §13 |
@@ -1221,7 +1588,7 @@ CB-R6  handling_chat_server_id 必须等于 local_server_id，否则领域返回
 | `LogicWorkDispatcher.cpp` | 六个 `Dispatch*` + `FINALIZE_CLOSE` 分支的 adapter 调用；保持 sink 顺序与 FINALIZE_CLOSE 入队顺序不变 | §6.5 / §11.2 |
 | `LogicSystem.h` / `.cpp` | adapter 成员与一次性装配；`SetMeetingSessionDirectory` / `ShutdownWorkExecutor` / `ClearMeetingSessionDirectory` | §12.1 / §12.3 / §12.5 |
 | `CServer.h` / `.cpp` | 实现 `IMeetingSessionDirectory`；新增 `FindSessionBySessionId`（`_mutex` 下 find，复制 shared_ptr） | §8.2 / §8.5 |
-| `CSession.h` / `.cpp` | 声明实现 `IMeetingOutboundSink`（**仅接口，不改变发送语义**） | §8.2 |
+| `CSession.h` / `.cpp` | 声明实现 `IMeetingLiveSession`（**仅一个 const 方法**：`DescribeSessionId()`；不改变任何发送语义） | §8.2 |
 | `ChatServer.cpp` | `CServer` 改 `make_shared`；注册目录；关闭序列（§12.3） | §12.3 / §12.4 |
 | `CMakeLists.txt` | 新增 TU 到 `CHATSERVER_APPLICATION_SOURCES` | §16.5 |
 | `tests/CMakeLists.txt` | 新增 adapter TU + M6 测试文件 | §16.5 |
@@ -1234,7 +1601,7 @@ CB-R6  handling_chat_server_id 必须等于 local_server_id，否则领域返回
 | --- | --- | --- |
 | `CSession.cpp`（发送队列语义） | **仅当**发现"无法从外部判断排队是否发生"会破坏某条验收 | 不得改变既有 `Send` 对 legacy 路径的**任何**行为（§13.3） |
 | `LogicWorkItem.h` | **仅当**需要为 adapter 观测补一个纯只读字段 | 须先证明全仓无该 struct 的聚合初始化（M5.1 §8 的方法） |
-| `AsioIOServicePool.*` | **仅当**发现 `Stop()` 不幂等 | 改动须单独说明；该文件为 GBK，须保持原编码 |
+| `AsioIOServicePool.*` | **M6.0.1 裁决：不需要修改**。方案 A 用"单一调用点 + scope guard"消除重复调用，因此 `Stop()` 保持非幂等也安全 | 若 Coding 时发现必须改，则须**先停**并单独裁决（该文件为 GBK，改动有转码风险，且会把 B1 从"设计规避"变成"语义变更"） |
 
 ### 15.3 MUST NOT MODIFY
 
@@ -1314,14 +1681,15 @@ docs/phase1/STEP-1.1 ~ STEP-1.6                              （冻结；发现�
 | SL4 | 强句柄在 erase 之后仍可用 | 先取句柄 → `ClearSession` → 句柄仍可解引用且不崩溃（证明持有强引用） |
 | SL5 | 句柄释放后不阻止析构 | 释放句柄后对象按自身时机析构（引用计数回到预期） |
 | SL6 | 无 `.get()` 建第二控制块 | 静态检查（§8.6） |
+| SL7 | **const 契约自洽** | 编译期：`shared_ptr<const IMeetingLiveSession>` 上只调用 const 成员；adapter 内不存在任何发送调用（静态检查 §8.2.3） |
 
 **组 3：notification target disappearing（Layer C，§25.7 明确要求）**
 
 | # | 用例 | 断言要点 |
 | --- | --- | --- |
-| ND1 | 全部目标存在 | `target_resolved == intents`，`target_missing == 0`，产出 N 条 NOTIFICATION |
-| ND2 | 全部目标消失 | `target_resolved == 0`，`target_missing == intents`，产出 0 条；无异常 |
-| ND3 | 部分消失 | 守恒：`resolved + missing == intents`；存在的各产出 1 条 |
+| ND1 | **N 个目标全部存在** ⇒ **恰好 N 条通知** | `target_resolved == N`，`target_missing == 0`，`outbound_produced == N`；且**每条**消息的 `notification_target_session_id` 互不相同、与输入集合逐一对应（不复用） |
+| ND2 | **M 个目标全部消失** ⇒ 0 条通知 | `target_resolved == 0`，`target_missing == N`，`outbound_produced == 0`；Collect 调用 0 次；无异常 |
+| ND3 | 部分消失 ⇒ 只对存活目标产出 | 守恒 `resolved + missing == N`；`outbound_produced == resolved`；**每条存活目标各 1 条**且目标字段正确；缺失目标 0 条 |
 | ND4 | 目标消失后领域状态不回滚 | `finalized == true`、`HasClosedSnapshot == true`、`MeetingClosed` 恰好一次 |
 | ND5 | 不产生第二个 FinalizeClose | FINALIZE_CLOSE 的 dispatch 计数仍为 1 |
 | ND6 | 重复 FinalizeClose 不再产生通知 | 第二次 `OnFinalizeClose` 的 `notification_session_ids` 为空 |
@@ -1382,7 +1750,7 @@ docs/phase1/STEP-1.1 ~ STEP-1.6                              （冻结；发现�
   RecordingSink             : IWorkObservationSink（既有）
   RecordingMessageCollector : IMeetingOutboundMessageCollector（新增，记录 typed 消息）
   FakeSessionDirectory      : IMeetingSessionDirectory（新增，返回受控 shared_ptr 或空）
-  FakeOutboundSink          : IMeetingOutboundSink（新增，证明句柄生命周期）
+  FakeLiveSession           : IMeetingLiveSession（新增，证明句柄生命周期与 const 契约）
 
 明确禁止：
   在测试里复制 DispatchWork/Dispatch* 的分发表
@@ -1459,7 +1827,7 @@ tests/CMakeLists.txt 新增：../MeetingResponseNotificationAdapter.cpp
 | --- | --- | --- | --- |
 | **M6.1** | `MeetingOutboundMessage.h` + `MeetingOutboundChannel.h`（三接口 + typed 值对象，仅标准库）+ C++14 门禁 | 两个新头 | 删除文件 |
 | **M6.2** | `MeetingRequestContextBuilder.h` + 组 1 用例（CB1–CB6） | builder + 测试 | 删除文件与用例 |
-| **M6.3** | `CServer::FindSessionBySessionId`（`_mutex` 下 find + 复制 shared_ptr）；`CSession` 声明实现 `IMeetingOutboundSink`；组 2 用例 | 两个既有文件最小改动 | 回退 `CServer.*`/`CSession.*` |
+| **M6.3** | `CServer::FindSessionBySessionId`（`_mutex` 下 find + 复制 shared_ptr）；`CSession` 声明实现 `IMeetingLiveSession`；组 2 用例 | 两个既有文件最小改动 | 回退 `CServer.*`/`CSession.*` |
 | **M6.4** | adapter `.h/.cpp` + `CountingNoWireCollector`；组 3/4/5 用例 | adapter 实现 | 删除 adapter 文件与用例 |
 | **M6.5** | `LogicWorkDispatcher` 增加 adapter 指针与八个调用点；保持 sink 顺序与 FINALIZE_CLOSE 入队不变；组 6/7 用例（含 OR4/OR5） | dispatcher 改动 | 回退 `LogicWorkDispatcher.*` |
 | **M6.6** | `LogicSystem` 装配 + 三个新入口；`ChatServer.cpp` 改 `make_shared` + 注册 + 关闭序列；CMake | 装配与关闭顺序 | 回退 `LogicSystem.*`/`ChatServer.cpp`/CMake |
@@ -1472,11 +1840,15 @@ tests/CMakeLists.txt 新增：../MeetingResponseNotificationAdapter.cpp
 M6.1：接口只依赖标准库；值对象**不含任何协议号字段**
 M6.2：builder 不读 _user_uid、不伪造 device、不补偿空 request_id
 M6.3：find 在 _mutex 下；从注册表复制 shared_ptr；无 .get() 造控制块；
-      不改 ClearSession 既有行为；不改 Send 既有语义
+      不改 ClearSession 既有行为；不改 Send 既有语义；
+      **IMeetingLiveSession 全 const**（§8.2.3）
 M6.4：安全矩阵逐格核对；L0–L5 边界如实；无 retry/ACK；异常不外逸；
-      计数不被用于业务判定；生产 collector 不调用 Send
+      计数不被用于业务判定；生产 collector 不调用 Send；
+      **逐目标生成 + 每条 Collect 恰好一次**（§7.1.2 / §7.1.3）
 M6.5：O1–O5 顺序证明；FINALIZE_CLOSE 仍不插队；sink 观测顺序不变
-M6.6：§12.3 关闭顺序；§12.5 注册时序三保证；make_shared 的理由与影响
+M6.6：§12.3 关闭路径（**pool->Stop() 恰好一次** + scope guard + 信号回调不调 Stop）；
+      §12.5 注册时序三保证；§12.2.3 成员声明顺序；
+      §12.1 collector 由 LogicSystem 拥有（非局部）；make_shared 的理由与影响
 M6.7：既有 224 用例零改动；新增 flaky 与既有 flaky 区分
 M6.8：验证边界如实（§20.2），不声称端到端可用
 ```
@@ -1589,7 +1961,46 @@ git push origin dev
 缓解：§7.3 / §13.3 明确计数不参与判定；Review 核对无 if 依赖它
 ```
 
-### R-11：Windows 门禁被误报
+### R-11：重复调用 `AsioIOServicePool::Stop()`（M6.0.1 新增，**已由设计规避**）
+
+```text
+风险：Stop() 非幂等 —— 第二次调用会解引用已置空的 unique_ptr（UB），
+      或对已 join 的 thread 再次 join（std::system_error）
+影响：高（关闭路径崩溃/未定义行为，且只在进程退出时出现，回归测试易漏）
+缓解：方案 A：唯一调用点置于 run() 之后的 scope guard；信号回调不再调用 pool->Stop()。
+      验收 A16 / B15；smoke 中确认只有一次 Stop。
+```
+
+### R-12：`run()` 异常退出导致清理被跳过（M6.0.1 新增）
+
+```text
+风险：若只用"run() 之后的顺序代码"做清理，run() 抛异常会跳过 drain
+影响：高（worker 未 join、CServer 先析构 ⇒ 悬垂）
+缓解：scope guard 在栈展开时执行清理，且 server 在同一作用域内尚未析构（§12.3.6）；
+      验收 B16。
+```
+
+### R-13：collector 生命周期短于 adapter（M6.0.1 新增）
+
+```text
+风险：把 CountingNoWireCollector 建成 EnsureWorkQueueStarted() 的局部对象，
+      adapter 随后持有悬垂引用
+影响：高（能编译、运行时 UB）
+缓解：§12.1 规定 collector 由 LogicSystem 以 unique_ptr 成员独占拥有；
+      声明顺序 collector 先于 adapter（§12.2.3）；验收 A18。
+```
+
+### R-14：声明顺序与依赖不一致（M6.0.1 新增，既有代码即如此）
+
+```text
+事实：现 LogicSystem.h 中 _work_executor（:90）声明在 _dispatcher（:94）之前，
+      逆序析构时 dispatcher 先于 executor 销毁。当前靠 ~LogicSystem 显式 StopAndJoin 兜住。
+风险：若显式停止被误删，就会在 worker 仍运行时销毁 dispatcher（UB）
+缓解：§12.2.3 要求调整声明顺序为 collector → adapter → dispatcher → executor；
+      §12.2.4 明确"声明顺序不替代显式停止"；验收 A17。
+```
+
+### R-15：Windows 门禁被误报
 
 ```text
 影响：中高（虚假通过）
@@ -1642,7 +2053,7 @@ Phase 1 原文未变：§25.7 的 Build gate 与 Files forbidden 均未修改；
 裁决内容：
   - 保留窄接口 IMeetingSessionDirectory（不暴露 CServer / CSession 具体类型，
     不暴露可变注册表）；
-  - lookup 返回 std::shared_ptr<const IMeetingOutboundSink>（**强句柄**），
+  - lookup 返回 std::shared_ptr<const IMeetingLiveSession>（**强句柄**，且 const-correct），
     禁止裸借用指针；
   - 实现必须在自有互斥下从持有 shared_ptr 的注册表**复制**（禁止 .get() 造控制块）；
   - 目录本身以 std::weak_ptr<IMeetingSessionDirectory> 被 adapter 引用（判活）。
@@ -1650,8 +2061,9 @@ Phase 1 原文未变：§25.7 的 Build gate 与 Files forbidden 均未修改；
 与 §15.2 的关系：
   §15.2 原文建议 "FindSession(session_id) → std::shared_ptr<CSession>（或等价受控 lookup）"。
   本裁决保持 shared_ptr 语义（**强于**推荐形式的"受控"要求），
-  但把元素类型收窄为 const IMeetingOutboundSink，以同时满足
-  "adapter 不依赖 CSession 具体类型"。
+  但把元素类型收窄为 `const IMeetingLiveSession`——一个**全 const 的存活标记**接口，
+  以同时满足"adapter 不依赖 CSession 具体类型"与"接口 const 性与句柄一致"。
+  真正的发送能力由 Phase 3 以**派生接口**新增（§8.2.4），不在本轮定义。
   ⇒ 属于"等价受控 lookup"的实现选择，**Phase 1 原文未变**。
 
 Phase 1 原文未变：§15.2 / §15.3 / §25.7 均未修改。
@@ -1699,9 +2111,25 @@ Phase 1 原文未变。
 | Conflict | 初版状态 | M6.0 裁决 | 是否阻塞 Coding |
 | --- | --- | --- | --- |
 | #1 占位 msgid | 未决（1a/1b 二选一） | **拒绝占位 ID；typed transport-neutral 边界；无真实发送** | 否 |
-| #2 lookup 形式 | 未决（裸指针） | **窄接口 + shared_ptr 强句柄 + weak 目录** | 否 |
+| #2 lookup 形式 | 未决（裸指针） | **窄接口 + `shared_ptr<const IMeetingLiveSession>` 强句柄 + weak 目录（M6.0.1 修正为 const-correct）** | 否 |
 | #3 Windows gate | 未决（互相矛盾） | **方案 iii：Linux 门禁；Windows NOT VERIFIED；R6 独立任务** | 否 |
 | #4 builder 调用者 | 未决 | **direct invocation 验证；生产调用者 Phase 3** | 否 |
+
+### 19.6 M6.0.1 追加的一致性裁决（不引入新 Conflict）
+
+M6.0.1 修的是 M6.0 文档内部的**自相矛盾**，不是新的范围争点；
+四项裁决仍保持原样，只是被写得更精确：
+
+| 项 | M6.0 的矛盾/缺口 | M6.0.1 裁决 | 依据 |
+| --- | --- | --- | --- |
+| B1 `Stop()` 幂等性 | §12.3 在信号回调与清理路径各调一次，而 `Stop()` 非幂等 | **方案 A**：移除信号回调中的 `Stop()`，唯一调用点置于 `run()` 之后的 scope guard；**不**修改 `AsioIOServicePool.*` | §12.3.1–§12.3.7 |
+| B2 成员声明顺序 | §12.2 的声明顺序与它自己声称的逆序析构结果相反 | **`_outbound_collector → _meeting_adapter → _dispatcher → _work_executor`**；显式停止不可被析构顺序替代 | §12.2.2–§12.2.4 |
+| B3 sink const 契约 | 非 const 方法 + `shared_ptr<const ...>` 句柄，不可同时成立 | 收窄为**全 const 的存活标记** `IMeetingLiveSession`；发送能力由 Phase 3 派生新增 | §8.2.1–§8.2.4 |
+| B4 逐目标 + collector 归属 | 通知算法未绑定 target；collector 可能成为局部对象 | **逐目标算法**（§7.1.2）+ **collector 由 `LogicSystem` 以 `unique_ptr` 独占拥有**（§12.1） | §7.1.2 / §12.1 |
+| B5 Git 元数据 | §1.3/§24 声称 M6.0 未推送，而 `3456c7f` 已在 `origin/dev` | 更正为"**M6.0 已发布**"；本轮（M6.0.1）为工作区未提交状态 | §1.3 / §24 |
+
+**Phase 1 仍然完全冻结**：以上五项均为文档内部一致性与实现可行性修正，
+**没有**修改、豁免或放宽 Phase 1 的任何条款。
 
 ---
 
@@ -1761,6 +2189,15 @@ A9   无新增 timer / background thread / 清理线程
 A10  internal work payload 仍只含稳定 ID；无伪 msg_id、无假 LogicNode
 A11  MeetingView 的每次字段读取都位于 has_view == true 分支内（§10.5 grep）
 A12  lookup 返回 shared_ptr；无 .get() 造第二控制块（§8.6）
+A15  IMeetingLiveSession 的全部成员函数为 const；lookup 返回 shared_ptr<const ...>；
+     adapter 不调用任何发送方法（§8.2.3 编译期 + 静态检查）
+A16  AsioIOServicePool::Stop() **恰好一个**调用点，且位于 io_context.run() 之后的 guard 内
+     （静态检查：全仓 grep 'pool->Stop\|->Stop()' 在 ChatServer.cpp 只有一处，且不在 signal 回调）
+A17  LogicSystem 成员声明顺序为
+     _outbound_collector → _meeting_adapter → _dispatcher → _work_executor（§12.2.3）
+A18  collector 不是任何函数的局部变量：由 LogicSystem 以 unique_ptr 成员独占拥有（§12.1）
+A19  MeetingNotificationMessage 每条构造都显式赋值非空 notification_target_session_id；
+     通知条数 == target_resolved（§7.1.3）
 A13  message.proto / *.sln / *.vcxproj / *.props / *.filters / MyChat_Qt / ChatServer2 零改动
 A14  Phase 1 文档零改动
 ```
@@ -1781,6 +2218,10 @@ B10  无 ACK / 无 retry：BF4 通过
 B11  句柄生命周期：SL4/SL5 通过（erase 后句柄仍可用；释放后不泄漏）
 B12  关闭幂等与 drain：OR4/OR5 通过
 B13  可观测性边界：BF1/BF5/BF6 通过（仅 L0–L3 可统计；不声称 L4/L5）
+B14  逐目标守恒：ND1/ND2/ND3 通过（N 个有效目标 ⇒ N 条通知；缺失目标 0 条）
+B15  关闭路径幂等性：OR4 通过；且 AsioIOServicePool::Stop() 在整轮 smoke 中只被调用一次
+B16  run() 异常路径清理：注入一个抛异常的 handler，断言 pool 已停、worker 已 join、
+     server 尚未析构（可用可观测计数/日志顺序断言）
 ```
 
 ### 21.3 工程类
@@ -1879,20 +2320,33 @@ git diff --stat
 git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 ```
 
-> 本轮为纯文档修订：上述命令显示仅 `docs/phase2/M6-response-notification-adapter.md`
-> 被修改，且无空白错误。
->
-> 提交与推送的实际结果：
->
-> ```text
-> 本地 commit : 一条本地 commit（subject "docs(phase2): adjudicate M6 design -
->               transport-neutral outbound boundary"；hash 以 git log -1 为准）
-> push        : FAILED（网络不可达：代理 127.0.0.1:7897 未运行；直连亦不可达）
-> origin/dev  : 仍为 afad064（本轮 commit 未到达远端）
-> ```
->
-> 因此本文档的当前状态是"**已本地提交、未推送**"。
-> 在 `git push` 成功之前，任何地方都不得声称本轮修订已推送。
+### 24.1 M6.0.1 的实际 Git 状态（以命令输出为准）
+
+```text
+进入本轮的远端基线 : origin/dev == 3456c7f96767ea23c59f856aca12ba50deb41699
+                     ⇒ M6.0 **已经发布**（不是"未推送"；M6.0 轮次当时的记录已过期）
+进入本轮时 HEAD     : 3456c7f（working tree / index 均 clean）
+本轮修改           : 仅 docs/phase2/M6-response-notification-adapter.md
+本轮 add/commit/push: **均未执行**（按本轮任务约束）
+⇒ 本轮修订目前仅存在于**工作区**：未暂存、未提交、未推送。
+```
+
+### 24.2 不得提前声称的状态（M6.0.1 显式约束）
+
+```text
+✗ 不得声称本轮（M6.0.1）修订已提交 —— 除非 `git log -1` 显示对应 commit
+✗ 不得声称本轮修订已推送 —— 除非 `git rev-parse origin/dev` 等于该 commit
+✓ 可以声称的是：M6.0 基线 `3456c7f` 已在 origin/dev（本轮进入时实测）
+本文档刻意不内嵌自身的未来 commit hash：任何 amend / rebase 都会让它立即过期。
+```
+
+### 24.3 历史记录更正
+
+```text
+M6.0 轮次记录过"本地 commit、未推送（代理不可达）"，那是**当时**的真实状态。
+事后 `3456c7f` 已被成功推送并出现在 origin/dev。
+因此 §1.3 与本节均已更正为"M6.0 已发布"；继续沿用"M6.0 未推送"的说法属于错误陈述。
+```
 
 ---
 
