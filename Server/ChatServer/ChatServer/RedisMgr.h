@@ -186,7 +186,13 @@ private:
 			redisFree(context);
 			return nullptr;
 		}
-		if (reply->type == REDIS_REPLY_ERROR) {
+		// 只有 "+OK" 状态回复才算认证成功。空指针、错误回复、空字符串
+		// 以及任何非预期类型（例如合法的 integer 回复）都必须拒绝。
+		const bool authenticated = reply->type == REDIS_REPLY_STATUS &&
+			reply->str != nullptr &&
+			strcmp(reply->str, "OK") == 0;
+
+		if (!authenticated) {
 			std::cout << "认证失败" << std::endl;
 			freeReplyObject(reply);
 			redisFree(context);

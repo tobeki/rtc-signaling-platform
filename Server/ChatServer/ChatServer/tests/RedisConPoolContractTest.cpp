@@ -19,7 +19,9 @@
 //   5. a connection whose command times out can be discarded and is never
 //      handed out again as a healthy connection;
 //   6. Close() is idempotent and the destructor joins the health thread;
-//   7. a connection returned after Close() is released (not silently dropped).
+//   7. a connection returned after Close() is released (not silently dropped);
+//   8. a non-"+OK" AUTH reply (e.g. a valid RESP integer) is rejected and the
+//      failed connection never enters the pool.
 //
 // Not covered here (see the M6.6a completion report):
 //   * the 60-second health-check / reconnect cycle and its stop check: the
@@ -187,7 +189,8 @@ public:
     enum class Mode {
         kNormal,             // AUTH -> +OK, PING -> +PONG, others -> +OK
         kSilentAfterAccept,  // never answer AUTH
-        kSilentAfterAuth     // answer AUTH, then never answer again
+        kSilentAfterAuth,    // answer AUTH, then never answer again
+        kUnexpectedAuthReply // AUTH -> :1 (valid RESP, but not a +OK status)
     };
 
     explicit FakeRedisPeer(Mode mode) : mode_(mode) {}
@@ -263,6 +266,13 @@ private:
                 }
                 const std::string command = Upper(args[0]);
                 if (command == "AUTH") {
+                    if (mode == Mode::kUnexpectedAuthReply) {
+                        // Valid RESP integer reply, but not "+OK": a correct
+                        // client must reject it instead of treating it as
+                        // authentication success.
+                        SendAll(fd, ":1\r\n");
+                        continue;
+                    }
                     // kSilentAfterAuth: answer AUTH successfully, then go silent
                     // so later commands hit the command I/O timeout.
                     SendAll(fd, "+OK\r\n");
@@ -479,5 +489,33 @@ TEST(RedisConPoolContract, ReturnAfterCloseReleasesConnection) {
 
     // The queue is empty; clearing it again must not double free.
     pool.ClearConnections();
+    SUCCEED();
+}
+
+// 8. AUTH returning a syntactically valid RESP reply that is not "+OK" (here
+//    an integer) must be rejected: not treated as success, not pooled, and the
+//    failed connection must be released.
+TEST(RedisConPoolContract, UnexpectedAuthReplyIsRejected) {
+    FakeRedisPeer peer(FakeRedisPeer::Mode::kUnexpectedAuthReply);
+    ASSERT_TRUE(peer.Start());
+
+    const auto start = Clock::now();
+    RedisConPool pool(1, "127.0.0.1", peer.port(), "secret");
+    const long long ctor_ms = ElapsedMs(start);
+
+    // This is not the timeout path: the constructor must return promptly.
+    EXPECT_GE(ctor_ms, 0);
+    EXPECT_LE(ctor_ms, 3000);
+
+    // The rejected connection must not be available from the pool.
+    const auto acquire_start = Clock::now();
+    EXPECT_EQ(pool.getConnection(), nullptr);
+    EXPECT_GE(ElapsedMs(acquire_start), 800);
+
+    // The failed redisContext must have been freed: the peer observes the close.
+    EXPECT_TRUE(WaitForActiveConnections(peer, 0, 3000));
+
+    // The pool must still close normally.
+    EXPECT_NO_THROW(pool.Close());
     SUCCEED();
 }
