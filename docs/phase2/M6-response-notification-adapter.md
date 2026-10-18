@@ -1,6 +1,6 @@
 # Phase 2 - M6：Response / Notification Adapter
 
-> 状态：**DESIGN COMPLETE（M6.0 → M6.0.7 七轮修订；Coding NOT STARTED）**
+> 状态：**DESIGN COMPLETE（M6.0 → M6.0.8 八轮修订；Coding NOT STARTED）**
 > Phase 2 M-planning 原始基线：`da19189a55ab13058a22c38c228d3043df72bdf6`（M5.1 收尾）
 > 本文档首次提交：`afad0644170b0882ee6b58ed99c493e82909a70f`（`docs(phase2): add M6-response-notification-adapter.md`）
 > 已发布的 M6.0 基线：`3456c7f96767ea23c59f856aca12ba50deb41699`
@@ -8,8 +8,10 @@
 > `2ffd083…`（M6.0.2 修订提交）：**M6.0.3 修订的起点基线，已不是当前远端**
 > M6.0.4 发布时的历史基线：`8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**）
 > M6.0.6 发布时的上一轮基线：`a761039ca4162f1016e651a07fca7000b8798c9f`（**已不是当前远端**）
-> 本文档当前修订：**M6.0.7 — API Contract & Redis Liveness Audit**（待人工 Review；工作区状态见 §1.3 与 §24）
-> M6 Coding：**NOT STARTED**（Final Coding Gate 由人工 Review 决定）
+> 已发布的 M6.0.7 基线：`02447fd507836d3f78bc0be8a24cb225bc91eb48`
+> 本文档当前修订：**M6.0.8 — R-20 Architecture Decision Incorporation**（待人工 Review；工作区状态见 §1.3 与 §24）
+> R-20 设计裁决：**DECIDED（M6.0.8）**；实现与验证：**NOT STARTED**（生产代码未修改）
+> M6 Coding：**NOT STARTED**；Final Coding Gate：**HOLD**（由人工 Review 决定；R-20 验收尚未通过）
 
 ---
 
@@ -24,12 +26,15 @@
 | **已发布的 M6.0 基线** | `3456c7f96767ea23c59f856aca12ba50deb41699` — `docs(phase2): adjudicate M6 design - transport-neutral outbound boundary` |
 | **已发布的 M6.0.1 基线** | `1454a8a5d6ec2a4c7238244c98f5f578e5bb2904` — `docs(phase2): adjudicate M6 design` |
 | **历史基线（仅供追溯）** | `2ffd08330a2047c6cf74fafba07f0f0a675a4f7f` — M6.0.2 修订提交，也是 **M6.0.3 修订的起点基线**；**已不是当前远端** |
-| **已发布的 M6.0.5 基线（上一轮）** | `b116ccc084bc7e9b6ab21931722e2d8faaa193ee` — `docs(phase2): close the M6 startup thread-ownership gap and fix the HDel contract` |
+| **已发布的 M6.0.5 基线** | `b116ccc084bc7e9b6ab21931722e2d8faaa193ee` — `docs(phase2): close the M6 startup thread-ownership gap and fix the HDel contract` |
 | **M6.0.4 发布时的历史基线** | `8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**，仅用于追溯） |
 | **M6.0.6 发布时的上一轮基线** | `a761039ca4162f1016e651a07fca7000b8798c9f`（**已不是当前远端**） |
-| 本修订轮次 | **M6.0.7 — API Contract & Redis Liveness Audit**（待 Review） |
-| 本修订依据 | 对 `a761039`（文档）与当前源码（RedisMgr.h/.cpp、AsioIOServicePool）+ 本机 gRPC 1.51.1 头文件的只读复核；**未修改任何代码** |
-| M6 Coding | **NOT STARTED** |
+| **已发布的 M6.0.7 基线** | `02447fd507836d3f78bc0be8a24cb225bc91eb48` — `docs(phase2): fix the BuildAndStart signature and record the Redis blocking risk` |
+| 本修订轮次 | **M6.0.8 — R-20 Architecture Decision Incorporation**（待 Review） |
+| 本修订依据 | 人工架构裁决 **D-R20-01 ~ D-R20-04**（§19.12）；对 `02447fd`（文档）与当前源码（`ChatServer.cpp`、`RedisMgr.h/.cpp`、`const.h`、`LogicSystem.cpp`、`StatusServer/StatusServiceImpl.cpp`）的只读复核；**未修改任何代码** |
+| R-20 设计裁决 | **DECIDED**（四项裁决见 §19.12；方案见 §12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18） |
+| R-20 实现与验证 | **NOT STARTED** —— 生产代码未修改，未通过任何 R-20 验收项 |
+| M6 Coding | **NOT STARTED**；Final Coding Gate：**HOLD** |
 | 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮零修改** |
 
 ### 1.2 本修订解决的问题
@@ -157,8 +162,35 @@ G1  `BuildAndStart()` 返回类型写错：目标代码用 `grpc::Server* raw = 
 G2  未识别 Redis 调用的**阻塞**形态：只讨论了"返回 false"与"抛异常"，
     而 getConnection() 的 cond_.wait 无超时、连接池为空时不重连，
     因此 HSet/HDel 可能**永不返回**；BestEffort() 对此无效。
+    （M6.0.8 更正：只有**构造期**空池不重连；运行期 fail_count_ > 0 时仍会重试，
+      见 §12.3.15.2 ③。）
     → 新增 §12.3.15（源码逐条核实 + 三种形态 + 候选 C1–C5）、R-20、F5b；
       **收回**"Cleanup 五步必然完成"的强声明（§12.3.5.1 / §12.3.15.4）
+```
+
+**M6.0.8（本轮）把 R-20 从"候选待裁决"推进为"已裁决、未实现"：**
+
+```text
+D-R20-01  Redis 是启动硬依赖
+          → 在 gRPC/TCP 对外开放之前完成 Redis 初始化与 HSet；
+            HSet 返回 false / 无可用连接 / 超时 ⇒ **启动失败**
+            （**false 仅表示"未确认成功"，不表示"确定未写入"**）；
+            失败路径必须回收已创建的后台线程与资源
+D-R20-02  保留 HDel（拒绝 C1/C2）
+          → HDel 是**有界 best-effort 清理**，且**有业务语义**
+            （StatusServer 用该 hash 中的计数参与服务器选择），
+            不得再写成"纯诊断副作用"；失败/超时后允许残留 field，但必须如实记录
+D-R20-03  允许扩大 RedisMgr 修改范围（**仅** ChatServer 的 RedisMgr.h/.cpp）
+          → 本文件记录该授权；不得据此修改 GateServer / StatusServer / ChatServer2，
+            也不得统一重构所有服务
+D-R20-04  关闭完成性目标
+          → 正常条件下优雅关闭；关闭期间 Redis 不可用时，连接池获取与同步命令必须有超时边界；
+            HDel 失败后继续安全的后续清理；
+            **不**要求证明任意 OS 故障 / 任意线程永久卡死 / 所有 DNS 故障下进程有界退出
+
+本轮只改本文件（§2.5）：把上述裁决写成一致、可实施的设计基线。
+生产代码 / 测试代码 / CMake / Phase 1 文档零修改；
+R-20 的**实现与验证仍未开始**，Final Coding Gate 仍为 **HOLD**（状态见 §1.1 / §19.12 / §25）。
 ```
 
 ### 1.3 提交状态（必须与远端事实一致）
@@ -186,6 +218,27 @@ G2  未识别 Redis 调用的**阻塞**形态：只讨论了"返回 false"与"�
 ⚠️ 历史更正：M6.0 曾记录"未推送"，M6.0.1/M6.0.2/M6.0.3 曾以更早的 hash 为基线 ——
    均为当时事实，之后都已推送。不得再把 1672888 / 3456c7f / 1454a8a / 2ffd083
    当作"当前 HEAD"；`2ffd083` / `8653a69` 分别只是 **M6.0.3 / M6.0.4 发布时**的历史基线。
+```
+
+```text
+本轮（M6.0.8）进入时实测:
+  origin/dev == HEAD == 02447fd507836d3f78bc0be8a24cb225bc91eb48
+  ⇒ M6.0.7 修订已发布（`02447fd`）
+  ⇒ 本文件 §1.1 的"已发布的 M6.0.7 基线"即以该 hash 记录
+  ⇒ 进入本轮时 working tree / index 均 clean；git diff --check 为空
+
+本轮（M6.0.8）:
+  只修改本文件 docs/phase2/M6-response-notification-adapter.md
+  修订内容见 §1.2 的 D-R20-01 ~ D-R20-04
+  **未**执行 git add / commit / push
+  **未**修改任何生产代码 / 测试代码 / CMake
+
+⚠️ 本轮的性质（不得误读）:
+  本节只证明"文档基线一致"。
+  它**不**证明 R-20 已修复，也**不**证明 M6 Coding 已获批准：
+    · R-20 设计裁决：DECIDED（§19.12）
+    · R-20 实现与验证：NOT STARTED（生产代码未动）
+    · Final Coding Gate：HOLD（§21 / §25）
 ```
 
 ### 1.4 本修订对 Phase 1 的地位声明
@@ -249,6 +302,43 @@ MODIFIED: docs/phase2/M6-response-notification-adapter.md   （本文件）
 ```
 
 **若 M6 Coding 需要超出 §15 Scope Matrix 的 MUST / MAY 集合，必须在 Coding 前单独裁决。**
+
+### 2.5 本轮（M6.0.8）范围与新增授权
+
+```text
+只修订本文档，内容是"把 R-20 的人工架构裁决写成设计基线"，共五类：
+  D-R20-01 Redis 硬依赖 + 启动失败策略         → §12.3.7 / §12.3.12.2 / §12.3.17
+  D-R20-02 保留 HDel + 有界 best-effort        → §12.3.5.1 / §12.3.9 / §12.3.15.5 / §12.3.18
+  D-R20-03 RedisMgr 修改授权（仅 ChatServer）  → §15.1 / §12.3.16 / §19.12
+  D-R20-04 关闭完成性目标与保证边界            → §12.3.18 / §20.2 / §21.2
+  C1–C5 的比较与取舍                          → §12.3.15.5 / §19.12
+```
+
+**D-R20-03 的授权边界（必须逐字遵守）：**
+
+```text
+允许在后续 Coding 修改（仅 ChatServer）:
+  Server/ChatServer/ChatServer/RedisMgr.h
+  Server/ChatServer/ChatServer/RedisMgr.cpp
+
+明确不允许:
+  Server/GateServer/**           （即使存在同源缺陷）
+  Server/StatusServer/**         （即使存在同源缺陷）
+  Server/ChatServer2/**          （R8 双份维护仍未解决）
+  任何"统一重构所有服务 Redis 层"的尝试
+
+本轮（M6.0.8）**不**行使该授权：它只是为 Coding 记录授权范围。
+```
+
+**本轮明确不做**（延续 §2.3 的纪律）：
+
+```text
+不修改生产代码 / 测试代码 / CMake / Phase 1 文档 / Windows 工程文件 / 其他文档
+不执行 git add / commit / push
+不实现 §12.3.16 的 RedisMgr 契约，不实现 §12.3.17 的启动顺序与信号生命周期
+不新增配置框架、额外线程或第三方依赖
+不把 R-20 标记为 PASS，不批准 Final Coding Gate
+```
 
 ---
 
@@ -1489,7 +1579,7 @@ R-12c  Redis 跳过风险：Close() 在 try 尾部；异常路径上不会执行
 | 级别 | 步骤 | 失败后果 | 策略 |
 | --- | --- | --- | --- |
 | **K — 关键生命周期前置条件** | 1a `grpc_server->Shutdown()`<br>1b `pool->Stop()`<br>2 `ShutdownWorkExecutor()`<br>4b `redis->Close()`<br>5 `grpc_thread_.join()` | 失败意味着**仍可能有线程在运行**，或留下**joinable `std::thread`** | **fail-stop**：记录致命错误后立即终止进程；**不继续**后续步骤；**不重试**（非幂等） |
-| **B — best-effort** | 3 `ClearMeetingSessionDirectory()`<br>4a `redis->HDel(...)` | 失败不产生生命周期错误（前者 noexcept；后者只返回 bool）。**`HDel` 的 `false` 语义（依据 RedisMgr.cpp:282-306）：可能来自 ① 无可用连接 ② 命令执行失败（reply 为空）③ reply 不是 INTEGER（错误/异常回复）④ `integer == 0`（字段不存在、未删除任何字段）。现有 `bool` 接口无法区分这四种原因。此外 `HDel` 内部首句 `getConnection()` 可能**无限阻塞**（连接池为空且未 Close）—— 详见 §12.3.15 / R-20** | 输出**中性**诊断（"未确认删除成功，原因不确定"）并继续；不重试、不改变关闭顺序；**既不断言字段一定不存在，也不断言连接一定失败**。**注意**：本步若阻塞，`BestEffort()` 无法介入，4b/5 不会执行 ⇒ **Cleanup 完成性无界** |
+| **B — best-effort** | 3 `ClearMeetingSessionDirectory()`<br>4a `redis->HDel(...)`（**仅当启动注册已确认时执行**；**是有业务语义的有界清理，不是纯诊断副作用**，见 §12.3.18） | 失败不产生生命周期错误（前者 noexcept；后者只返回 bool）。**`HDel` 的 `false` 语义（依据 RedisMgr.cpp:282-306）：可能来自 ① 无可用连接 ② 命令执行失败（reply 为空）③ reply 不是 INTEGER（错误/异常回复）④ `integer == 0`（字段不存在、未删除任何字段）。现有 `bool` 接口无法区分这四种原因。此外 `HDel` 内部首句 `getConnection()` 在**当前源码**下可能**无限阻塞**（连接池为空且未 Close）；M6.0.8 的目标契约要求该获取**有界**（§12.3.16）—— 详见 §12.3.15 / R-20** | 输出**中性**诊断（"未确认删除成功，原因不确定"）并继续；不重试、不改变关闭顺序；**既不断言字段一定不存在，也不断言连接一定失败**。**注意**：在**当前源码**下本步若阻塞，`BestEffort()` 无法介入，4b/5 不会执行 ⇒ **Cleanup 完成性无界**；M6.0.8 的目标是让 4a 的获取与命令都有界，从而在**本项目声明的条件下** Cleanup 有界（**不**声称任意 OS/线程/DNS 故障下有界，§12.3.18.3） |
 
 **为什么恰好是这五步属于 K**：
 
@@ -1514,18 +1604,25 @@ R-12c  Redis 跳过风险：Close() 在 try 尾部；异常路径上不会执行
    （那会引发 UB 或 std::terminate），进程主动终止。
 ```
 
-**第三类形态：阻塞（M6.0.7 补充，必须与"失败"区分）**：
+**第三类形态：阻塞（M6.0.7 补充；M6.0.8 给出目标契约，必须与"失败"区分）**：
 
 ```text
 K/B 分级与 fail-stop 只覆盖两种形态：**返回失败** 与 **抛异常**。
-源码核实表明还存在第三种：**调用根本不返回**（RedisConPool::getConnection() 的
-无超时 cond_.wait；详见 §12.3.15 与 R-20）。
+源码核实表明还存在第三种：**调用根本不返回**
+（当前源码：RedisConPool::getConnection() 的无超时 cond_.wait，以及 hiredis
+ 未配置命令超时的阻塞 I/O；详见 §12.3.15 与 R-20）。
 
-⇒ 对本节的策略必须附加一条限定：
+⇒ 对**当前源码**的策略必须附加一条限定：
   ✗ "五步必然走完" 不成立；
   ✗ "失败一定被 Fatal()/BestEffort() 捕获" 不成立（阻塞既不返回也不抛）；
   ✓ 成立的是：**若某步返回失败或抛异常**，则按上述分级处理。
-⇒ Cleanup 的**完成性是有界的这一前提不成立**，本文件不再作此声明。
+
+⇒ M6.0.8 的目标（D-R20-04，§12.3.16 / §12.3.18）：
+  让 4a 的连接获取与同步命令、以及 4b 的 PING/Close 都有超时边界，
+  从而把"阻塞"转换为**可观测的返回失败**，再交给上面的 K/B 分级处理。
+  **但这不是无条件保证**：它只覆盖本项目声明的条件（Redis 不可达/空池/不应答、
+  有界的 TCP 与命令超时），**不**覆盖任意 OS 故障、内核级永久阻塞、DNS 解析卡死等
+  外部因素；因此仍不得声称"Cleanup 在任意情况下都必然走完"（§12.3.18.3）。
 ```
 
 ##### 12.3.5.2 协调器实现（空依赖构造 + noexcept 登记 + 空指针安全）
@@ -1550,7 +1647,8 @@ public:
     //   抛出异常只会导致"什么都没启动就退出"，是安全且可诊断的。
     explicit ShutdownCoordinator(const std::string& server_name)
         : grpc_server_(), grpc_thread_(), pool_(), redis_(), logic_(),
-          tcp_server_(), server_name_(server_name), done_(false) {}
+          tcp_server_(), server_name_(server_name), done_(false),
+          registration_confirmed_(false) {}
 
     // ---- 责任登记：全部 noexcept，因此"取得资源"与"登记责任"之间没有异常窗口 ----
     //
@@ -1575,6 +1673,10 @@ public:
     void SetLogicSystem(LogicSystem* logic) noexcept { logic_ = logic; }
     // 方案 B：强引用；SetTcpServer() 成功之后协调器才持有 TCP Server
     void SetTcpServer(std::shared_ptr<CServer> tcp_server) noexcept { tcp_server_ = tcp_server; }
+
+    // M6.0.8（D-R20-01）：仅在启动 HSet 判真后调用；决定 Cleanup 的 4a 是否执行。
+    // noexcept：只写 bool，无分配、无抛点（§12.3.5.3 表）。
+    void MarkRegistrationConfirmed() noexcept { registration_confirmed_ = true; }
 
     // 启动 gRPC 线程。若此处抛 std::system_error，线程仍非 joinable ⇒ 无 terminate 风险。
     void StartGrpcThread() /* 可抛 */ {
@@ -1608,7 +1710,16 @@ public:
 
         BestEffort("4a redis HDel",
                    [&]{
-                       if (!redis_) { return; }
+                       // M6.0.8（§12.3.18.2）：注册从未确认 ⇒ 跳过，不做无意义的删除
+                       if (!redis_ || !registration_confirmed_) {
+                           std::cerr << "shutdown diagnostic: redis HDel skipped"
+                                        " (startup registration was never confirmed)"
+                                     << std::endl;
+                           return;
+                       }
+                       // HDel 是**有业务语义**的有界 best-effort 清理
+                       // （StatusServer 用 logincount_lhf 的计数做服务器选择），
+                       // 不是"纯诊断副作用"（D-R20-02）。
                        // HDel 的 bool 契约（依据 RedisMgr.cpp:282-306）：
                        //   false 可能来自：(i) getConnection() 返回空（无可用连接）
                        //                  (ii) redisCommand 返回空指针（命令执行失败）
@@ -1676,6 +1787,7 @@ private:
     std::shared_ptr<CServer>            tcp_server_;   // 方案 B 强引用
     std::string                         server_name_;
     bool                                done_;
+    bool                                registration_confirmed_;  // M6.0.8：4a 的门
 };
 
 } // namespace
@@ -1690,6 +1802,7 @@ private:
 | `SetPool` / `SetRedis` / `SetTcpServer` | `std::shared_ptr<T>`（**按值**） | `shared_ptr` 拷贝赋值 | **否**（noexcept） | 标准规定 `shared_ptr` 的拷贝构造/拷贝赋值均为 `noexcept` |
 | `SetGrpcServer` | `std::unique_ptr<grpc::Server>`（**按值，移动**） | `unique_ptr` 移动赋值 | **否**（noexcept） | `unique_ptr` 移动赋值 noexcept，且**不分配任何内存** |
 | `SetLogicSystem` | `LogicSystem*` | 裸指针赋值 | **否** | 指针赋值不抛 |
+| `MarkRegistrationConfirmed`（M6.0.8） | 无参 | `bool` 写 | **否** | 只写 bool，无分配 |
 
 ```text
 ⇒ 若资源获取调用正常返回，则紧随的 SetXxx() 必定完成，责任登记不可能因异常而中断。
@@ -1748,15 +1861,18 @@ private:
 ##### 12.3.6.1 声明顺序（析构顺序由它决定，且必须与线程/引用依赖相容）
 
 ```text
-声明 : io_context → signals → service → shutdown(协调器) → pool → redis → tcp_server
-析构 : tcp_server → redis → pool → shutdown → service → signals → io_context
+声明 : io_context → service → shutdown(协调器) → signals(unique_ptr 持有者) → pool → redis → tcp_server
+析构 : tcp_server → redis → pool → signals → shutdown → service → io_context
 
-注：grpc_server **不再有 main 局部变量**（M6.0.6）：它是一个在阶段 5 创建、
-    随即以 unique_ptr 移动交给协调器的临时对象，其生命周期完全由协调器成员决定；
-    因此它不在上面的局部声明序列里，而在**协调器析构体内**销毁。
+注 1：grpc_server **不再有 main 局部变量**（M6.0.6）：它是一个在阶段 5 创建、
+      随即以 unique_ptr 移动交给协调器的临时对象，其生命周期完全由协调器成员决定；
+      因此它不在上面的局部声明序列里，而在**协调器析构体内**销毁。
+注 2：signal_set 由 unique_ptr 持有（M6.0.8），**在阶段 8 才构造**；
+      正常路径在 Cleanup 之前 `reset()`；失败路径靠"holder 声明在协调器之后"
+      先于协调器析构 ⇒ 两种路径下 Cleanup 期间信号都已恢复默认处置（§12.3.17.3）。
 ```
 
-三条约束决定了这个顺序：
+四条约束决定了这个顺序：
 
 ```text
 (1) io_context 必须**先于** tcp_server 声明 ⇒ io_context 晚于 tcp_server 析构
@@ -1769,6 +1885,12 @@ private:
 (3) 协调器必须**先于**任何后台线程的启动 ⇒ 见 12.3.6.2 的启动顺序。
     协调器持有 pool/redis/tcp_server 的 shared_ptr 强引用与 grpc_server 的**独占**
     unique_ptr，因此即使对应局部 shared_ptr 先析构，对象仍在协调器 Cleanup() 期间存活。
+(4) signal_set 的持有者必须**晚于协调器**声明（M6.0.8，D-R20-04）：
+    · 它引用 io_context，因此仍必须先于 io_context 析构；
+    · 声明在协调器之后 ⇒ 失败路径上先于协调器析构 ⇒ Cleanup 执行时信号已恢复默认处置；
+    · 正常路径不依赖析构顺序：阶段 10 在 Cleanup 之前显式 `signals.reset()`。
+    ⇒ 若仍把 signal_set 声明在阶段 0（协调器之前），启动期阻塞会被 Asio 接管信号，
+      且失败路径的 Cleanup 期间信号也仍被接管（违反 §12.3.17.3 规则 1/3/4）。
 ```
 
 ##### 12.3.6.2 启动顺序（每取得一项资源立即登记）
@@ -1781,11 +1903,16 @@ int main()
     try {
         // ---- 阶段 0：仅构造，不启动任何后台线程 ---------------------------
         boost::asio::io_context io_context;          // 声明早于协调器 ⇒ 晚于 tcp_server 析构
-        boost::asio::signal_set signals(io_context, SIGINT, SIGTERM);
         ChatServiceImpl service;                     // 声明早于 grpc_server ⇒ 晚于其析构
+        // ⚠ M6.0.8：signal_set **不在这里**构造（D-R20-04，§12.3.17.3）
 
         // ---- 阶段 1：协调器就位（空依赖；**任何后台线程之前**）--------------
         ShutdownCoordinator shutdown(server_name);
+
+        // ---- 阶段 1.5（M6.0.8）：信号持有者只声明、不构造 -------------------
+        // 声明在协调器之后 ⇒ 失败路径上先于协调器析构 ⇒ Cleanup 期间信号已恢复默认处置
+        // 构造推迟到阶段 8（Redis 初始化之后），理由见 §12.3.17.3
+        std::unique_ptr<boost::asio::signal_set> signals;
 
         // ---- 阶段 2：pool（构造即启动 _threads）→ 立即登记 ----------------
         auto pool = AsioIOServicePool::GetInstance();
@@ -1795,8 +1922,15 @@ int main()
         auto redis = RedisMgr::GetInstance();
         shutdown.SetRedis(redis);                    // noexcept
 
-        // ---- 阶段 4：首个 Redis 业务调用 ----------------------------------
-        redis->HSet(LOGIN_COUNT, server_name, "0");   // 失败/抛异常 ⇒ 已登记，Cleanup 兜底
+        // ---- 阶段 4：首个 Redis 业务调用（**硬依赖，必须判真**）-------------
+        // D-R20-01：false 含"无可用连接 / 获取超时 / 命令超时"⇒ 启动失败。
+        // true = 成功已确认；false = **未确认**（可能未执行，也可能已执行但回复超时；
+        // 不得据此宣称字段一定不存在，§12.3.15.2 ④ / §12.3.18.2）。
+        if (!redis->HSet(LOGIN_COUNT, server_name, "0")) {
+            throw std::runtime_error(
+                "redis HSet(LOGIN_COUNT) failed; refusing to open services");
+        }
+        shutdown.MarkRegistrationConfirmed();          // noexcept；供 Cleanup 的 4a 判断
 
         // ---- 阶段 5：gRPC Server（BuildAndStart 起即开始服务）→ 立即登记 ----
         grpc::ServerBuilder builder;
@@ -1839,20 +1973,25 @@ int main()
         shutdown.SetLogicSystem(logic);                          // noexcept：立即登记
         logic->SetMeetingSessionDirectory(tcp_server);            // noexcept（契约）
 
-        // ---- 阶段 8：信号回调（只唤醒；不做任何清理）----------------------
-        signals.async_wait([&io_context](auto, auto) { io_context.stop(); });
+        // ---- 阶段 8：信号生命周期（M6.0.8：Redis 之后才让 Asio 接管信号）-----
+        // 构造即安装 SIGINT/SIGTERM 处理器；回调只在 io_context.run() 内派发
+        // ⇒ 不得把它提前到阶段 0（§12.3.17.3 规则 1/2）
+        signals = std::make_unique<boost::asio::signal_set>(io_context, SIGINT, SIGTERM);
+        signals->async_wait([&io_context](auto, auto) { io_context.stop(); });
 
         // ---- 阶段 9：gRPC Wait() 线程（最后启动）--------------------------
         shutdown.StartGrpcThread();
 
-        // ---- 阶段 10：运行 + 清理 ----------------------------------------
+        // ---- 阶段 10：运行 + 清理（M6.0.8）--------------------------------
         try {
             io_context.run();
         }
         catch (...) {
+            signals.reset();      // 先恢复默认信号处置，再进入清理（§12.3.17.3 规则 3）
             shutdown.Cleanup();   // 幂等；此时 tcp_server 局部仍在作用域内
             throw;
         }
+        signals.reset();          // 同上：避免 io_context 已 stop 时吞掉后续 SIGTERM
         shutdown.Cleanup();
     }
     catch (const std::exception& e) {
@@ -1863,6 +2002,14 @@ int main()
 ```
 
 ```text
+与 M6.0.7 的差异（M6.0.8，仅针对 R-20，共五处）：
+  · 阶段 0 **移除** signal_set 构造；改为阶段 1.5 只声明 unique_ptr 持有者。
+  · 阶段 4 的 HSet **判真**：false / 超时 ⇒ 抛启动失败异常（D-R20-01）。
+  · 阶段 8 才构造 signal_set 并登记 async_wait（Redis 初始化之后）。
+  · 阶段 10 在 Cleanup 之前 `signals.reset()`：关闭阻塞期不吞后续 SIGTERM。
+  · 新增 `MarkRegistrationConfirmed()`（noexcept），决定 4a 是否执行（§12.3.18.2）。
+  ⇒ 不改变"协调器早于所有后台线程"与"gRPC 交接无异常窗口"两条既有结论。
+
 与 M6.0.5 的差异（M6.0.6 修正，共四处）：
   · gRPC Server 所有权：shared_ptr 改为 **unique_ptr 独占 + noexcept 移动**。
     原因：从裸指针构造 shared_ptr 要分配控制块（可能抛），而 BuildAndStart()
@@ -1897,12 +2044,18 @@ int main()
 | 信号 | `stop()` ⇒ 返回 | 是 | 全部 | 同上 | fail-stop |
 | **`run()` 抛异常** | 否 | 是 | 全部 | 内层 `catch(...)` **先显式** `Cleanup()` 再 `throw` | fail-stop |
 | **`BuildAndStart()` 返回 nullptr** | 未进入 | 否 | pool/redis | 协调器：**主动抛** `std::runtime_error` ⇒ 析构兜底清理 | fail-stop（若 1b/4b 失败） |
+| **阶段 4 `HSet` 返回 false / 超时**（D-R20-01 硬依赖） | 未进入 | 否 | pool/redis | 协调器：**主动抛** `std::runtime_error` 表示启动失败 ⇒ 析构兜底清理；**4a 跳过**（注册未确认，§12.3.18.2） | fail-stop（若 1b/4b 失败） |
 | **阶段 0–8 任一抛异常**（run 尚未进入） | 未开始 | **否**（阶段 9 未到） | 截至该点已登记者 | 协调器析构兜底 `Cleanup()` | fail-stop（若该路径的 1b/4b 失败） |
 | **阶段 9 `StartGrpcThread()` 抛** | 未开始 | 否（线程未启动） | 全部 | 协调器析构兜底 `Cleanup()` | 同上 |
 | **`GetInstance()` 自身抛（类 A）** | 未开始 | 否 | 该项未登记 | **无人**（对象未诞生）⇒ 见 §12.3.12.3 | 不可达；M6 不声称覆盖 |
 
 **三条"运行后"路径都会显式调用 `Cleanup()`**；析构兜底覆盖"显式调用之前就抛异常"的
 全部初始化路径，此时 `done_` 为 false，兜底执行真实清理。
+
+**M6.0.8 追加（D-R20-01）**：阶段 4 的 `HSet` **必须判真**——返回 `false`、连接池无可用连接
+或操作超时，一律视为**启动失败**，不得继续进入阶段 5。由此新增一条关闭分支：
+**"启动注册未确认 ⇒ 跳过 4a（HDel）"**，避免在注册从未成功时再做一次无意义的 Redis 删除
+（§12.3.18.2）。该分支不改变 1a/1b/2/3/4b/5 的既有权责。
 
 #### 12.3.8 顺序与各项保证（逐条回答 12 问）
 
@@ -1918,8 +2071,8 @@ int main()
 | ⑧ `Close → FINALIZE_CLOSE` drain 为何能完成 | `StopAndJoin` 先 `RequestStop` 再排空；内部入队通道只对消费者开放 | §12.3.10 |
 | ⑨ `ClearMeetingSessionDirectory()` 为何在 drain 之后 | 步骤 3 晚于步骤 2 | §12.3.5.2 |
 | ⑩ `tcp_server` 与 drain 的关系 | **方案 B 下**（前提：`tcp_server` 已成功构造并 `SetTcpServer()`）：协调器持强引用 ⇒ 即使走析构兜底，`tcp_server` 在 `Cleanup()` 体内仍然存活 ⇒ **drain 期间目录有效**，无需降级。若 `tcp_server` 构造即失败：目录未注册、gRPC 线程未启动，此时不存在"需要 lookup 的 drain"，也不得声称某个 TCP Server 仍存活 | §12.3.8.1 |
-| ⑪ Redis 清理如何覆盖异常路径 | 步骤 4a/4b 在 `Cleanup()` 内；4a best-effort、4b 关键（fail-stop） | §12.3.5.1 / §12.3.14 |
-| ⑫ 所有 `std::thread` 析构前为何不再 joinable | 在**类 B**（单例已返回）路径上：gRPC 线程 ← 步骤 5；pool `_threads` ← 1b；Redis `check_thread_` ← 4b；executor `worker_` ← 2；四者皆 K 级，失败即 fail-stop，不会继续到对象析构。**但类 A**（单例构造期抛）不受协调器保护 —— 那时可能仍有 joinable thread，M6 不声称消除（§12.3.12.3） | §12.3.9 / §12.3.12.3 |
+| ⑪ Redis 清理如何覆盖异常路径 | 步骤 4a/4b 在 `Cleanup()` 内；4a best-effort（受 `registration_confirmed_` 门控，目标为**有界**）、4b 关键（fail-stop） | §12.3.5.1 / §12.3.14 / §12.3.18 |
+| ⑫ 所有 `std::thread` 析构前为何不再 joinable | 在**类 B**（单例已返回）路径上：gRPC 线程 ← 步骤 5；pool `_threads` ← 1b；Redis `check_thread_` ← 4b；executor `worker_` ← 2；四者皆 K 级，失败即 fail-stop，不会继续到对象析构。**但类 A**（单例构造期抛）不受协调器保护 —— 那时可能仍有 joinable thread，M6 不声称消除（§12.3.12.3）。M6.0.8 补充：A-2 的 joinable 残留在目标契约中由 §12.3.16 第 10 项（析构 join）覆盖，但**实现未开始**；A-1 仍在覆盖范围外 | §12.3.9 / §12.3.12.3 / §12.3.16 |
 
 #### 12.3.8.1 所有权与析构证明（M6.0.5：协调器前置 + 全强引用）
 
@@ -1978,8 +2131,8 @@ int main()
 | 1b `pool->Stop()` | **K** | 是（`join` → `std::system_error`） | fail-stop（可能有 io_context 线程仍存活） |
 | 2 `ShutdownWorkExecutor()` | **K** | 是（`worker_.join()`） | fail-stop（worker 可能仍访问 MeetingService/Redis） |
 | 3 `ClearMeetingSessionDirectory()` | B | 否（`weak_ptr` 赋值 noexcept） | 记录并继续 |
-| 4a `redis->HDel(...)` | B | 返回值不抛（`false` 可能是无连接 / 命令失败 / 异常回复 / `integer==0`，**无法区分**）；但**可能不返回**（`getConnection()` 无超时等待，§12.3.15） | 检查返回值，`false` 时输出中性诊断并继续；**不**断言字段不存在，**不**断言连接失败。**阻塞情形不在 `BestEffort()` 能力范围内**（R-20） |
-| 4b `redis->Close()` | **K** | 是（`check_thread_.join()`） | fail-stop（否则静态析构期 terminate） |
+| 4a `redis->HDel(...)`（**仅当启动注册已确认**） | B | 返回值不抛（`false` 可能是无连接 / 命令失败 / 异常回复 / `integer==0`，**无法区分**）；**当前源码可能不返回**；M6.0.8 目标契约下获取与命令**均有界**（§12.3.16） | 检查返回值，`false` 时输出中性诊断并**继续**；**不**断言字段不存在，**不**断言连接失败；有界性只覆盖 §12.3.18.3 声明的条件 |
+| 4b `redis->Close()` | **K** | 是（`check_thread_.join()`；**当前源码非幂等**） | M6.0.8 契约：`Close()` **可安全重复调用**，健康检查的 PING 有命令超时 ⇒ join 有界（§12.3.16）；仍失败 ⇒ fail-stop |
 | 5 `grpc_thread_.join()` | **K** | 是（`std::system_error`） | fail-stop（成员析构期 terminate） |
 
 ```text
@@ -2008,7 +2161,10 @@ fail-stop 的代价（如实）：Redis 清理可能未完成；不宣称优雅�
 
 ```text
 pool->Stop()                          : 不可重复（非幂等）。唯一调用点 + done_；失败 fail-stop、不重试
-RedisMgr::Close()                     : 不可重复（非幂等）。同上
+RedisMgr::Close()                     : **当前源码不可重复**（第二次 `check_thread_.join()` 抛 `std::system_error`）；
+                                        **M6.0.8 目标契约要求可安全重复**（§12.3.16 第 8 项）。
+                                        注意：Cleanup **不重试**；"可重复"是为了**安全**（含析构兜底路径），
+                                        不是为了"再试一次"（§12.3.5.2）
 SerializedWorkExecutor::StopAndJoin() : 可重复（RequestStop 幂等；joinable 守卫；非本线程守卫）
 ShutdownCoordinator::Cleanup()        : 可重复（done_ 闸门；第二次为空操作）
 ClearMeetingSessionDirectory()        : 幂等
@@ -2054,8 +2210,8 @@ done_ 的语义（B1 第 4 项）：
 | F2 | 阶段 2 `AsioIOServicePool::GetInstance()` **抛** —— 按 **A-1-i / A-1-ii / A-1-iii** 三分（见 §12.3.12.3） | A-1-i：无；A-1-ii：**部分**；A-1-iii：**全部** | 无（未返回） | **无人**（类 A，协调器**从未获得运行机会**） | 无法（无句柄） | 否 | 否 | 不可达 | A-1-i：**否**；A-1-ii / A-1-iii：**是 ⇒ terminate** |
 | F3 | 阶段 2 返回后、`SetPool` 期间 | pool 线程已运行 | pool 已返回 | 协调器（登记为 noexcept，必完成） | **是** | 视 redis_ 是否已登记（此时否） | 否 | 1b 失败 ⇒ fail-stop | **否** |
 | F4 | 阶段 3 `RedisMgr::GetInstance()` **抛** —— 按 **A-2-i / A-2-ii / A-2-iii** 三分（见 §12.3.12.3） | pool 线程**已运行**；Redis：A-2-i 无 / A-2-ii **部分** / A-2-iii **全部** | pool 已登记 | **A-2-i**：协调器可清理 pool（无 Redis 线程）<br>**A-2-ii / A-2-iii**：**无人** —— 在 Redis 单例的 shared_ptr 构造失败/析构路径上即 terminate，协调器**没有机会运行** | **是**（pool） | 无法（无句柄） | 否 | A-2-i：1b 失败 ⇒ fail-stop；A-2-ii/iii：不可达 | A-2-i：**否**；A-2-ii / A-2-iii：**是 ⇒ terminate（pool 可能也被拖入 terminate）** |
-| F5 | 阶段 4 `HSet` **抛异常** | pool 线程 + check_thread_ **均在运行** | pool、redis 均已登记 | 协调器（析构兜底） | **是** | **是** | 否 | 1b/4b 失败 ⇒ fail-stop | **否** |
-| F5b | 阶段 4 `HSet` **不返回**（连接池为空 ⇒ `getConnection()` 无限等待） | 同上 | 同上 | **无人** —— 阻塞不是异常，**不触发栈展开 ⇒ Cleanup() 不执行** | 未执行 | 未执行 | 未执行 | **不可达**（未进入清理） | 进程挂起；线程仍在运行 —— 属 **R-20**，M6 不覆盖 |
+| F5 | 阶段 4 `HSet` **抛异常或返回 false/超时**（D-R20-01） | pool 线程 + check_thread_ **均在运行** | pool、redis 均已登记 | 协调器（析构兜底）；主动抛 `std::runtime_error` 表示启动失败 | **是** | **是** | 否 | 1b/4b 失败 ⇒ fail-stop | **否** |
+| F5b | 阶段 4 `HSet` **不返回**（**当前源码**：连接池为空 ⇒ `getConnection()` 无限等待） | 同上 | 同上 | **无人** —— 阻塞不是异常，**不触发栈展开 ⇒ Cleanup() 不执行** | 未执行 | 未执行 | 未执行 | **不可达**（未进入清理） | 进程挂起；线程仍在运行 —— 属 **R-20**。**M6.0.8 目标**：有界获取 + 命令超时 ⇒ 转为 F5 的启动失败路径（§12.3.16 / §12.3.17.2）；实现前不得声称已覆盖 |
 | F6 | 阶段 5 `BuildAndStart()` 抛 | 同上 | 同上 | 协调器 | 是 | 是 | 未登记 ⇒ 跳过（gRPC 自行清理其内部） | 1b/4b ⇒ fail-stop | **否** |
 | F7 | 阶段 5 `BuildAndStart()` 返回**空 unique_ptr**（API 约定的错误返回） | 同上 | 同上 | 协调器：**主动抛 `std::runtime_error`** ⇒ 已登记的 pool/redis 由析构兜底清理 | 是 | 是 | 无 Server 可停 ⇒ 跳过 | 1b/4b ⇒ fail-stop | **否**（视为初始化失败，见 D-4 / R-17） |
 | F7b | 阶段 5 `SetGrpcServer(std::move(g))` 移动 | 同上 | 同上 | 不可达（**单次 noexcept 移动**，不分配内存、无可抛点） | — | — | — | 不可达 | **否**（交接窗口为零，§12.3.5.3） |
@@ -2126,23 +2282,35 @@ A-2-iii 构造完成，但 RedisMgr 的 shared_ptr 控制块分配失败
        ⇒ check_thread_ joinable ⇒ **std::terminate**；协调器无运行机会。
 ```
 
-###### 为什么不能在 M6 内修复 A-i ~ A-iii
+###### A-1 为何仍不能在 M6 内修复；A-2 的处置（M6.0.8 更新）
 
 ```text
+【A-1：AsioIOServicePool】
 · 唯一有效的修法是在 AsioIOServicePool 的析构/构造函数里 join 线程，
   但那需要修改 **GBK 编码**的 AsioIOServicePool.*（本轮明确禁止）。
 · 或者改变单例获取方式（例如全局对象、或提前 Stop），
   那会改变既有启动语义与静态析构顺序，超出 M6 授权范围。
-⇒ M6 **如实登记为不覆盖**，并**不**把 A-ii / A-iii 计入任何 PASS 结论。
+⇒ A-1-ii / A-1-iii **仍如实登记为不覆盖**，不计入任何 PASS。
+
+【A-2：RedisMgr / RedisConPool —— D-R20-03 后的处置】
+· M6.0.8 已获授权修改 ChatServer 的 RedisMgr.h/.cpp（§15.1 / §19.12）。
+· 目标契约的第 10 项（§12.3.16）要求析构函数在必要时停止并 join check_thread_，
+  从而消除 A-2-ii / A-2-iii 的 "joinable thread ⇒ std::terminate" 路径。
+· 但这只是**设计契约**：截至 M6.0.8，生产代码未修改、未实现、未验证
+  ⇒ 仍**不得**声称 A-2-ii / A-2-iii 已修复，也不得计入 PASS。
+· 该授权的边界：仅 ChatServer；GateServer / StatusServer / ChatServer2 的同源缺陷
+  不在本次授权内（§2.5）。
 ```
 
 ###### 补充：`RedisConPool` 的另一个构造期缺陷（R-19）
 
 ```text
-RedisMgr.h:29 → auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
+RedisMgr.h:25-26 → auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
                if (reply->type == REDIS_REPLY_ERROR) { ... }
 未检查 reply 是否为 nullptr ⇒ 可能空指针解引用。
-属既有缺陷、且位于**构造期**（类 A），M6 不修改 RedisMgr.h，仅登记（R-19）。
+属既有缺陷；初始连接位于**构造期**（类 A），reconnect 位于健康检查线程。
+M6.0.8（R2）已把 **AUTH 空回复检查**纳入 R-20 的必要实现范围（§12.3.16 第 11 项），
+不再留待"Coding 时再决定"；其余 R-19 方面仍可延期，见 §18 R-19。
 ```
 
 ##### 12.3.12.4 与 gRPC 相关的两个边界
@@ -2274,89 +2442,407 @@ M6 的清理完成性此前只考虑了"返回 false"与"抛异常"两种失败�
    auto* context = connections_.front(); connections_.pop(); return context;
 
    ⇒ **无超时的 cond_.wait**。若 connections_ 为空且 b_stop_ == false，
-     调用线程**无限期阻塞**；只有两种事件能唤醒它：
+     调用线程**无限期阻塞**；能唤醒它的只有：
        · returnConnection() 归还连接并 notify_one
+       · reconnect() 成功（内部就是 returnConnection()；仅 fail_count_ > 0 时可达，见 ③）
        · Close() 置 b_stop_ = true 并 notify_all
    ⇒ 结论（问题 1）：**是**，会无限等待。
 
-② RedisConPool 构造（RedisMgr.h:5-50）
+② RedisConPool 构造（RedisMgr.h:14-50）
    循环 redisConnect / AUTH；任一失败即 continue（**不入队**）。
-   ⇒ 若 Redis 不可达，connections_ 为空，且 b_stop_ == false。
+   AUTH 返回 ERROR 时只 freeReplyObject(reply) 后 continue，**不 redisFree(context)**
+   ⇒ socket 泄漏（M6.0.8 复核新增，对应 §12.3.16 第 11 项）。
+   另：AUTH 的 reply 未判空即读 reply->type（**已纳入 R-20 必要范围**，
+   见 §12.3.16 第 11 项 / §18 R-19）。
+   ⇒ 若 Redis 不可达或密码错误，connections_ 为空，且 b_stop_ == false。
 
-③ checkThreadPro()（RedisMgr.h:138-190）
+③ checkThreadPro()（RedisMgr.h:138-204）—— **必须分两种情形**（更正 M6.0.7 的绝对表述）
    pool_size = connections_.size();               ← 空池时为 0
    for (i = 0; i < pool_size && !b_stop_; ++i) { ... PING ... }
-   ⇒ 空池时**循环体一次都不执行**；该函数只对**已有**连接做 PING，
-     **不会创建新连接**。
-   ⇒ 结论（问题 4）：**不会重连**。初始连接全失败 ⇒ 连接池永久为空
-     ⇒ 之后任何 getConnection() 都无限阻塞。
+   随后：while (fail_count_ > 0) { reconnect(); ... }   ← **与 pool_size 无关**
 
-④ RedisMgr::HSet()（RedisMgr.cpp:185-207）
+   情形 A：**构造期**全部失败 ⇒ 空池且 fail_count_ == 0
+           ⇒ for 循环不执行、reconnect 循环也不执行
+           ⇒ **永不重连**；之后任何 getConnection() 都无限阻塞。
+   情形 B：**运行期**连接被 PING 判失败并释放 ⇒ fail_count_ > 0
+           ⇒ 即使池已被清空，reconnect 循环仍每 ~60 秒重试；
+             成功则 returnConnection() 回填并 notify_one。
+   ⇒ 结论（问题 4）："空池永不重连"**只对情形 A 成立**；M6.0.7 写的
+     "该函数只对已有连接做 PING、不会创建新连接"**不准确**：
+     reconnect() 确实会创建新连接，但只在 fail_count_ > 0 时。
+   ⇒ 附带事实（M6.0.8 复核新增）：reconnect() 使用成员 host_/pwd_（RedisMgr.h:114/122），
+     而这两个成员是 `const char*`（:254-255），指向 RedisMgr 构造函数里的局部
+     std::string（RedisMgr.cpp:8-11）⇒ 构造结束即**悬垂** ⇒ 重连路径是 UB。
+     （死代码 checkThread() 的 :228/:236 同理。）对应 §12.3.16 第 1 项。
+
+④ RedisMgr::HSet()（RedisMgr.cpp:185-207；另有 argv 重载 :210-244）
    第一句就是 _con_pool->getConnection();
    ⇒ 结论（问题 2）：**是**，HSet 可能在连接池为空时永久阻塞。
+   ⇒ bool 语义（**必须区分"确认成功"与"确认失败"**）：
+       · true  ：客户端收到了 type == INTEGER 的回复 ⇒ **操作成功已确认**
+                 （HSET 对已存在字段同样返回 INTEGER，值可能为 0 或 1）。
+       · false ：客户端**没有确认**操作成功。可能来自
+                   (i) getConnection() 返回 nullptr（命令**未发出**）；
+                   (ii) reply 为空（命令可能未发出，也可能已发出但没收到回复；
+                        **若是命令 I/O 超时，服务端可能已经执行了 HSET**）；
+                   (iii) reply 非 INTEGER（命令已到达服务端，但返回错误回复）。
+     ⇒ 因此 false **不能**解释为"Redis 一定没有执行 HSET"，只能解释为
+       "本次调用没有得到成功确认"。D-R20-01 以它作为启动失败信号，
+       依据是"未确认成功即不得开放服务"，**不是**"确定未写入"。
 
 ⑤ RedisMgr::HDel()（RedisMgr.cpp:282-306）
-   第一句同样是 _con_pool->getConnection();
+   第一句同样是 _con_pool->getConnection()；
    ⇒ 结论（问题 3）：**是**，HDel 可能在 Cleanup 的步骤 4a 永久阻塞，
      从而**永远到不了** 4b（redis->Close()）与 5（grpc_thread_.join()）。
+   ⇒ bool 语义：`success = reply->integer > 0`（:300-301）⇒ false 同时覆盖
+     "无连接/超时""命令失败""非 INTEGER""字段本就不存在"四种原因，
+     **不能**据此判断删除是否成功（§12.3.5.1 的中性诊断规则仍然适用）。
 
 ⑥ RedisConPool::Close()（RedisMgr.h:106-110）
    b_stop_ = true; cond_.notify_all(); check_thread_.join();
    ⇒ Close() 本身是"解锁"手段：它置 b_stop_ 后，阻塞中的 getConnection 会返回 nullptr。
      但它位于 4a **之后** ⇒ 4a 阻塞时 4b 永远不会被执行，形成**死锁式的关闭挂起**。
+   ⇒ 同步关系缺陷（M6.0.8 复核新增）：b_stop_ 是 atomic，但 Close() **不持 mutex_**
+     就置位并 notify_all；`wait(lock, pred)` 等价于 `while (!pred()) wait(lock);`。
+     若 notify 发生在 pred() 返回 false 之后、wait 入队之前，通知会**丢失**
+     ⇒ Close() **不能**被视为"无条件唤醒所有等待者"（§12.3.16 第 7/8 项）。
    ⇒ 附带风险：Close() 的 join 依赖 check_thread_ 能及时醒来；
      若该线程正卡在某条连接的阻塞 redisCommand(PING) 上，join 也会被拖住
-     （受 TCP 超时约束，但**不是**由设计保证的有界等待）。
+     （当前源码**没有**命令超时，因此**不是**由设计保证的有界等待）。
+   ⇒ 另：Close() 非幂等（第二次 join 抛 std::system_error）；
+     ~RedisConPool()（:52-54）为空、不 join ⇒ 未显式 Close 的路径上，
+     joinable thread 会触发 std::terminate。
+   ⇒ 另：`returnConnection()` 在 b_stop_ 为 true 时直接 return、**不释放** context
+     （RedisMgr.h:97-101）⇒ 停止后归还的连接被静默丢弃（R3 要求显式释放责任，
+     见 §12.3.16 第 14 项）。
 ```
 
-##### 12.3.15.3 对 M6 各阶段的影响（逐点）
+##### 12.3.15.3 对 M6 各阶段的影响（逐点；M6.0.8 更新）
 
 ```text
 启动期（阶段 4 的 HSet）：
-  · 若连接池为空 ⇒ HSet 无限阻塞 ⇒ 启动挂起。
-  · 此时协调器已建立（阶段 1）且 pool/redis 已登记（阶段 2/3），
-    但**阻塞不是异常**，不会触发栈展开 ⇒ Cleanup() **不会被调用**。
-  · 信号处理：signals.async_wait 在**阶段 8**，而阶段 4 早于它
-    ⇒ 阻塞期间不存在"由协调器执行的有序清理"这一路径。
-    （至于 SIGTERM 的实际处置是默认终止还是被 asio 的信号机制接收，
-      取决于 boost.asio 在 signal_set 构造/插入时是否已安装处理器，
-      本设计**不作断言**；无论哪种情形，都不会走 Cleanup。）
+  · 若连接池为空 ⇒ HSet 在当前源码下无限阻塞 ⇒ 启动挂起。
+  · 阻塞不是异常，不触发栈展开 ⇒ Cleanup() **不会被调用**（F5b）。
+  · 信号处置（M6.0.8 已核实，不再是"不作断言"）：
+      - boost::asio::signal_set 的**构造**就会安装 SIGINT/SIGTERM 处理器；
+        仅登记 async_wait **不会**让回调运行 —— 回调只在 io_context.run() 内派发。
+      - 因此"先构造 signal_set、后进入可能阻塞的 Redis 初始化"会使信号被 Asio
+        接管、但回调永远没有运行机会 ⇒ 进程不能被 SIGTERM/SIGINT 终止（只能 SIGKILL）。
+      - 现行源码把 signal_set 放在 ChatServer.cpp:42（HSet 之后）
+        ⇒ 启动阻塞期仍是**默认处置**：可被 SIGTERM 终止，但没有清理。
+        M6.0.7 的目标形态把 signal_set 放在阶段 0（HSet 之前）⇒ **更糟**。
+    ⇒ M6.0.8 裁决（§12.3.17）：Redis 初始化与 HSet 必须在 signal_set 构造之前完成；
+      并明确拒绝 C5（把 HSet 移到信号注册之后）作为阻塞解决方案。
 
 关闭期（Cleanup 的步骤 4a 的 HDel）：
-  · 若此时连接池为空 ⇒ HDel 无限阻塞 ⇒ 4b/Close 与 5/join 永不执行
-    ⇒ 进程**挂起而非退出**。
+  · 当前源码：连接池为空 ⇒ HDel 无限阻塞 ⇒ 4b/Close 与 5/join 永不执行
+    ⇒ 进程**挂起而非退出**；而解除阻塞的 Close 又排在它后面 ⇒ 死锁式关闭挂起。
+  · 若 HDel 是在**已取得连接**后阻塞在 redisCommand（对端不应答、无命令超时），
+    则连 Close 也无法解除（Close 不会中断已借出连接上的阻塞 I/O）。
   · `BestEffort()` 只捕获异常，对"不返回"无效（§12.3.15.1）。
-  · ⇒ **Cleanup 的完成性不再是有界的**：五步 K 级 fail-stop 的论证覆盖
-    "抛异常"，**不覆盖"调用不返回"**。
+  · 进程在 run() 返回之后 signal_set 仍存活、io_context 已 stop
+    ⇒ 后续 SIGTERM 被 Asio 接管但永远不会派发 ⇒ **关闭挂起不可被 SIGTERM 终止**。
+    M6.0.8 因此要求：进入 Cleanup 之前销毁（reset）signal_set（§12.3.17.3）。
+  · ⇒ 当前源码下 Cleanup 完成性**无界**；M6.0.8 的目标是在声明条件下有界（§12.3.18.3）。
 ```
 
-##### 12.3.15.4 M6 的如实声明（不得夸大）
+##### 12.3.15.4 M6 的如实声明（M6.0.8 更新，不得夸大）
 
 ```text
-✗ M6 **不**提供 Redis 操作的"有界完成"保证；
-✗ M6 **不**声称 Cleanup 在任何情况下都会走完 5 步；
-✗ M6 **不**声称"连接池为空"会被自动恢复（checkThreadPro 不重连）；
-✓ M6 能保证：Redis 调用**返回失败**或**抛异常**时，有明确的处理路径与计数；
-✓ M6 能保证：`redis->Close()` 一旦被调用，会解除那些**正在 getConnection 中等待**的调用
-   （置 b_stop_ + notify_all）；但前提是流程能走到 4b。
-⇒ 该风险登记为 **R-20**，并明确为**既有代码性质**（不是 M6 引入）。
-  M6 **不修改** RedisMgr.* / RedisConPool（不在授权范围）。
+对**当前源码**（生产代码未修改）：
+  ✗ 不提供 Redis 操作的"有界完成"保证；
+  ✗ 不声称 Cleanup 在任何情况下都会走完 5 步；
+  ✗ 不声称 Close() 会**无条件**唤醒所有等待者
+    （存在丢失通知窗口，且其自身 join 可能被无超时 PING 拖住）；
+  ✗ 不声称"连接池为空"会被自动恢复
+    （情形 A 不会；情形 B 只在 fail_count_ > 0 时每 ~60 秒重试，且重连路径有 UB）；
+  ✓ 能保证：Redis 调用**返回失败**或**抛异常**时，有明确的处理路径与计数。
+
+对 **M6.0.8 目标契约**（§12.3.16 / §12.3.18，**尚未实现**）：
+  ✓ 连接池获取、TCP 连接、命令 I/O 都有超时 ⇒ 把"阻塞"转换为"返回失败"；
+  ✓ Close() 的停止标志更新与通知在同一互斥量下完成，且可安全重复调用；
+  ✓ 正常关闭会停止并 join 健康检查线程；
+  ✗ **不**声称任意 OS 故障 / 任意线程永久卡死 / 所有 DNS 故障下进程能在固定时间内退出。
+
+⇒ 该风险登记为 **R-20**：设计已裁决（DECIDED），实现与验证未开始（NOT STARTED）。
+  生产代码在本轮**未修改**；M6.0.8 只把授权与契约写进文档
+  （§15.1 / §12.3.16 / §19.12）。
 ```
 
-##### 12.3.15.5 候选缓解方案（**仅供人工裁决，本轮不实施**）
+##### 12.3.15.5 候选方案与取舍（M6.0.8 已裁决）
 
-| 方案 | 内容 | 代价 / 风险 | 是否需改生产代码 |
+| 方案 | 裁决 | 理由（源码/语义依据） | 代价与边界 |
 | --- | --- | --- | --- |
-| C1 | **取消 Cleanup 中的 HDel**（该调用只是诊断性清理，不承担正确性职责） | 失去"登录计数清理"这一 best-effort 副作用；但 Cleanup 不再有 4a 的阻塞点 | 否（仅设计层面） |
-| C2 | 把 4b（`redis->Close()`）提到 4a 之前，使 HDel 在 `b_stop_ == true` 后立即返回 nullptr | 语义改变：Close 之后 HDel 必然失败，该诊断失去意义（相当于 C1 但更绕） | 否（仅顺序） |
-| C3 | 给 `getConnection()` 增加带超时的等待（`wait_for`） | 需修改 `RedisMgr.h`（既有共享代码，且本头文件在 M6 授权范围之外） | **是** |
-| C4 | 构造期失败即视为启动失败（连接池为空 ⇒ 不进入主循环） | 需新增"池是否为空"的查询 API，或修改 RedisMgr 构造语义 | **是** |
-| C5 | 把首次 HSet 移到 signal 注册之后 | 只是把"启动期挂起"变成"可被信号打断的挂起"，不解决关闭期阻塞 | 否（仅顺序） |
+| C1 取消 Cleanup 中的 HDel | **拒绝** | HDel 删除的 field 被 StatusServer 用于服务器选择（`StatusServiceImpl.cpp:36/51` 读 `logincount_lhf`）；残留旧计数会让 StatusServer 继续**优先选择已停服的 ChatServer**。它不是"纯诊断副作用" | 会破坏既有清理行为与 STEP-2.4 记录的关闭清理证据 |
+| C2 把 Close 提到 HDel 之前 | **拒绝** | Close 之后 `b_stop_ == true` ⇒ HDel 必然返回 false，等于"用一个必然失败的调用"绕开问题；同时把无界等待转移到 K 级步骤 Close（其 join 仍可能被无超时 PING 拖住） | 语义与 C1 等价但更隐晦；不减少阻塞面 |
+| C3 仅给 `getConnection()` 加超时 | **单独使用不充分** | 它只限制**连接池获取**；取得连接后 `redisCommand` 仍可能无限阻塞（hiredis 默认无命令超时），Close 的 join 也可能被 PING 拖住 | 必须与 hiredis 连接/命令超时一起使用，才构成 C3′（§12.3.16） |
+| C4 空池 ⇒ 启动失败 | **采用（Redis 硬依赖策略）** | Redis 不可用时 ChatServer 无法提供登录/会话能力；HSet 的 **true 表示成功已确认**，false 仅表示**未确认**（可能已写入，§12.3.15.2 ④） | **必须**同时处理部分初始化失败路径的资源回收（§12.3.17.2）；只覆盖"构造期空池"，不覆盖运行期失联；失败路径跳过 HDel 可能残留已写入的 field（D-R20-02） |
+| C5 把 HSet 移到 signal 注册之后 | **拒绝** | 异步信号处理器"已登记"不等于"已运行"；回调只在 `io_context.run()` 内派发，run() 之前它不能完成任何清理，反而会让阻塞期 SIGTERM 被 Asio 吞掉（只能 SIGKILL） | 不解决任何阻塞路径，只降低可运维性 |
+
+**采用方案（推荐组合）：**
 
 ```text
-推荐倾向：C1（最小、无生产代码改动、去掉 Cleanup 中的阻塞点）。
-但 C1 仍需人工裁决——它改变的是"关闭时是否尝试清理登录计数"这一行为。
-⇒ 本轮**不**把它写成已决结论，仅作为 R-20 的候选。
+C3′（有界连接池获取 + hiredis 连接/命令超时）+ C4（Redis 硬依赖 ⇒ 启动失败）
+  + 正确的信号处理器生命周期管理（§12.3.17.3）
+```
+
+```text
+该组合覆盖：
+  · 启动期：HSet 的获取与命令都有界；失败/超时 ⇒ 启动失败 ⇒ 回收已创建线程与资源
+  · 关闭期：HDel 的获取与命令都有界；失败 ⇒ 中性诊断 + 继续 4b/5
+  · 健康检查：PING 有命令超时 ⇒ Close 的 join 有界
+  · 信号：Redis 初始化早于 signal_set 构造；Cleanup 前销毁 signal_set
+          ⇒ 启动阻塞期保留默认终止处置，关闭阻塞期不吞后续 SIGTERM
+
+该组合**不**声称：
+  ✗ 任意 OS 故障、内核级永久阻塞、DNS 解析卡死下进程有界退出；
+  ✗ 单次超时等于整个启动过程的总超时（10 条初始连接是**串行**建立，§12.3.16.2）；
+  ✗ R-20 已修复（实现与验证均未开始）。
+```
+
+##### 12.3.16 RedisMgr 设计契约（M6.0.8，D-R20-03）
+
+```text
+适用范围：仅 Server/ChatServer/ChatServer/RedisMgr.h 与 RedisMgr.cpp。
+目标：消除 R-20 的三条阻塞路径（连接池获取 / 命令 I/O / Close 的 join），
+      同时保持既有 bool 返回契约与单例结构；不扩展全部 Redis API、不重构其他服务。
+
+编号契约（Coding 必须逐条对齐；本轮只写契约，不实现）：
+ 1. host/password 以**稳定生命周期**的对象保存（如 std::string 成员），
+    不得再保存指向构造函数局部变量的 const char*；reconnect() 必须使用有效值。
+ 2. 初始连接的每条连接都使用 redisConnectWithTimeout()（连接超时）。
+ 3. 所有连接（初始、重连、以及 PING 使用的连接）都必须设置命令 I/O 超时
+    （redisSetTimeout 或等价的 redisOptions.command_timeout），
+    覆盖业务命令、PING 与重连流程。
+ 4. getConnection() 改为**有界等待**（wait_for + predicate），超时返回 nullptr；
+    保持现有"nullptr ⇒ 调用方返回 false"的契约
+    （RedisMgr.cpp 的 12 个获取点目前都已判空）。
+ 5. 逐一检查 RedisMgr.cpp 的每个 getConnection() 调用点：获取失败后**不得**继续解引用空指针；
+    每条提前返回路径都必须归还或释放连接（建议统一 RAII guard，如 HDel 现有的 Defer）。
+ 6. 不得把已失效的连接当作健康连接归还：命令失败 / 上下文 err 置位的连接必须被丢弃
+    （或重建），而不是直接 returnConnection()。
+ 7. 修正停止标志与条件变量的同步：Close() 在**持有 mutex_** 时置 b_stop_，再 notify_all；
+    保证 wait 谓词的状态变化与通知在同一临界区内（消除丢失通知窗口）。
+ 8. Close() 必须**可安全重复调用**（joinable 守卫）；重复调用是空操作，不抛异常。
+ 9. 正常关闭时停止并 join 健康检查线程（check_thread_）。
+10. 析构函数提供线程回收保障：若 check_thread_ 仍 joinable，则停止并 join，
+    避免 joinable thread 直接触发 std::terminate（覆盖未显式 Close 的失败路径）。
+11. AUTH 失败路径（**初始连接与 reconnect 都必须**；R2 已将其纳入 R-20 必要范围）：
+    · 解引用前检查 `reply == nullptr`；
+    · 失败时按实际所有权释放：reply 存在则 freeReplyObject(reply)，
+      context 必须 redisFree(context)（不得只 free reply 而泄漏 socket）；
+    · 失败必须进入**可诊断**的初始化失败 / 重连失败路径
+      （构造期 ⇒ 该连接不入池并记录原因，必要时整体初始化失败；
+        重连期 ⇒ 记为一次失败，不推进 fail_count_ 的成功回填），
+      不得因空指针解引用而绕过预定控制流。
+    该检查**不再是**"Coding 时再决定"的 R-19 遗留项（§18 R-19）。
+12. 健康检查的**每次**重连开始前必须检查停止状态；一旦停止，
+    不得再开始新的 reconnect（当前 `while (fail_count_ > 0)` 没有这个检查）。
+13. 已在进行的 connect / AUTH / PING 由第 2、3 项的超时契约约束；
+    不为"快速停止"引入额外线程、取消机制或复杂调度器。
+14. 池停止后仍被归还的 redisContext 必须有**明确释放责任**：
+    `returnConnection()` 在 b_stop_ 为 true 时不得静默丢弃指针
+    （当前源码直接 return，造成泄漏）；必须 redisFree，或把所有权交还调用方并由其释放。
+15. `Close()` / 析构必须释放剩余**空闲**连接，且释放时不得有其它线程仍在使用同一连接：
+    `ClearConnections()` 在互斥量下只释放队列中的连接；
+    已借出的连接由借出方按第 14 项负责，禁止 Close 越权释放。
+16. `Close()` 的耗时推导必须计入关闭时**可能正在进行的一次 reconnect**
+    （connect + AUTH），不得只按 PING 估算（§12.3.16.2）。
+17. 保持既有 bool / std::string 返回契约；不得借机扩展全部 Redis API，
+    不得修改其他服务的 RedisMgr 副本，不得引入新框架。
+```
+
+###### 12.3.16.1 超时参数的初始建议（待测试确认，不是 SLA）
+
+| 项 | 初始值 | 说明 |
+| --- | --- | --- |
+| 连接池获取（`getConnection()`） | **1 s** | 空池 / 全部借出时的等待上限 |
+| Redis TCP 连接（初始与 `reconnect()`） | **1 s** | 每条连接各自的 connect 预算 |
+| Redis AUTH 命令 I/O | **2 s** | 初始连接的 AUTH 与 reconnect 的 AUTH，各自独立计时 |
+| Redis 业务命令 / `PING` 命令 I/O | **2 s** | 与 AUTH 使用同一命令超时上限 |
+
+```text
+必须同时注明：
+  · 这些是**项目初始配置建议**，不是生产级 SLA；须由 §21.2 的测试确认后固化。
+  · redisConnectWithTimeout() 只约束 TCP connect，**不保证 DNS 解析本身**有相同上限
+    （getaddrinfo 仍是同步阻塞调用）。
+  · redisSetTimeout() 设置的是 **socket 读/写操作的超时**，不是"任意情况下整条命令的
+    硬总期限"：多段响应、内核调度、重试都可能让单条命令的实际耗时超过该值。
+  · 单次超时 ≠ 整个启动过程的总超时；连接与 AUTH 是**分别**计时的两段。
+```
+
+###### 12.3.16.2 Redis 相关最坏情况的推导（不是承诺）
+
+```text
+初始连接（**每条 = connect + AUTH 两段**）：
+  · 连接成功但 AUTH 不响应：1 s + 2 s = 3 s/条
+  · 10 条**串行** ⇒ 最坏 ~30 s
+  · 若 TCP 连接本身失败：约 1 s/条 ⇒ ~10 s（不进入 AUTH）
+启动 HSet：获取 ≤ 1 s + 命令 ≤ 2 s ⇒ ≤ 3 s
+  ⇒ 场景估算（10 条全部"连上但 AUTH 超时" + HSet 获取与命令都超时）：
+     30 s + 3 s ≈ **33 s**
+关闭 HDel：获取 ≤ 1 s + 命令 ≤ 2 s ⇒ ≤ 3 s
+Close    ：join 可能等待一次**进行中的 reconnect**（connect 1 s + AUTH 2 s），
+           或一次 PING（≤ 2 s）+ 剩余时间；ClearConnections 另计
+⇒ 33 s 的前提与边界（不得省略）：
+  · 它是"Redis 层串行最坏情况"的**场景估算**，前提是 10 条连接都能建立 TCP
+    但对 AUTH 均不响应，且 HSet 先获取超时、再命令超时。
+  · **不是**整个进程启动的硬上限：DNS 解析（getaddrinfo）、线程调度、OS 重传、
+    内核缓冲区与信号处理都可能额外增加时间。
+  · 若实际连接池大小或超时参数不同，该数字必须按同一公式重算。
+  · 以上是"Redis 层最坏情况"的**推导值**，不是整个进程启动/退出的有界承诺。
+```
+
+###### 12.3.16.3 明确不引入的东西
+
+```text
+不引入配置框架（超时值先以具名常量或构造参数存在即可）
+不引入额外线程或 timer 充当"看门狗"
+不引入第三方依赖（hiredis 已在用）
+不改变单例形态、不改变 bool 契约、不改动其他服务的 RedisMgr 副本
+```
+
+##### 12.3.17 启动顺序与信号生命周期（M6.0.8，D-R20-01 / D-R20-04）
+
+###### 12.3.17.1 目标启动顺序（设计，本轮不实现）
+
+```text
+阶段 0  io_context / service                    （**不**构造 signal_set）
+阶段 1  ShutdownCoordinator（空依赖）
+阶段 1.5 signals 持有者（unique_ptr）只声明、不构造（声明在协调器之后）
+阶段 2  pool = GetInstance() → SetPool
+阶段 3  redis = GetInstance() → SetRedis
+阶段 4  redis->HSet(LOGIN_COUNT, server_name, "0")   ← **必须判真**
+        false / 无可用连接 / 超时 ⇒ 启动失败（抛异常）
+        成功 ⇒ registration_confirmed_ = true
+阶段 5  BuildAndStart → 判空 → SetGrpcServer(move)
+阶段 6  tcp_server = make_shared<CServer> → SetTcpServer
+阶段 7  logic = GetInstance() → SetLogicSystem；再 SetMeetingSessionDirectory
+阶段 8  signals = make_unique<signal_set>(io_context, SIGINT, SIGTERM)
+        signals->async_wait([...](auto, auto) { io_context.stop(); })
+阶段 9  StartGrpcThread()
+阶段 10 io_context.run()；返回或异常 ⇒ **先 signals.reset()**，再 Cleanup()
+```
+
+```text
+与 M6.0.7 的差异（M6.0.8，共五处，均针对 R-20）：
+  · 阶段 0 **移除** signal_set：不允许在 Redis 初始化之前让 Asio 接管信号。
+  · 阶段 4 的 HSet **判真**：失败/超时 ⇒ 启动失败（D-R20-01）。
+  · 阶段 8 才构造 signal_set（Redis 初始化之后、run() 之前）。
+  · 阶段 10 在 Cleanup 之前 **reset signal_set**：关闭阻塞期不吞后续 SIGTERM。
+  · 新增 registration_confirmed_ 状态，决定 4a 是否执行（§12.3.18.2）。
+```
+
+###### 12.3.17.2 启动硬依赖规则（D-R20-01）
+
+```text
+· Redis 初始化与 HSet 必须在 gRPC/TCP 对外开放之前完成。
+  当前源码在相对顺序上已经是"HSet 在 BuildAndStart 之前"，但**没有检查返回值**
+  ⇒ 本裁决补的是"判真 + 失败即停止"，不是改变该相对顺序。
+· HSet 返回 false（含连接池无可用连接、获取超时、命令超时）⇒ 抛启动失败异常，
+  不得继续 BuildAndStart。
+· **false 的语义边界（R1）**：false 只表示"未确认成功"，不表示"确定未写入"。
+    - 获取连接失败 ⇒ 命令未发出；
+    - 命令 I/O 超时 ⇒ Redis **可能已经执行了 HSet**，只是客户端没收到回复；
+    - 错误回复 ⇒ 命令已到达但失败。
+  无论哪种情形都不得开放服务（硬依赖），也**不得**据此宣称字段一定不存在。
+· 该情形下 `registration_confirmed_` 保持 false，Cleanup 跳过 4a（§12.3.18.2）；
+  其后果是**可能残留一个实际已写入的 field**——该残留属于 D-R20-02 允许的
+  best-effort 边界，必须如实记录，不得声称已消除。
+· 启动失败路径必须回收已创建的后台线程与资源：
+    pool 的 _threads       → 1b
+    Redis 的 check_thread_ → 4b
+    已登记的 gRPC Server    → 1a（若已登记）
+    executor（若已创建）    → 2
+    目录清理                → 3
+    **4a 跳过**（注册未确认，§12.3.18.2）
+· 该规则只覆盖"构造期空池 / Redis 不可达"这一类启动失败；
+  运行期 Redis 失联属于运行期问题，不在本条内。
+```
+
+###### 12.3.17.3 信号生命周期规则（D-R20-04，含实证依据）
+
+```text
+事实（M6.0.7 标注为"不作断言"，M6.0.8 据源码与本机最小工程复核确认）：
+  · boost::asio::signal_set 的**构造**即安装 SIGINT/SIGTERM 处理器；
+  · 回调只在 io_context.run()/poll() 内派发；仅登记 async_wait 不会让回调运行；
+  · signal_set 存活期间信号被 Asio 接管；io_context 已 stop 时到达的信号会被吞掉；
+  · signal_set 被销毁后，信号恢复默认处置（SIGTERM 可终止进程）。
+
+⇒ 规则：
+ 1. 不得在"可能长时间阻塞的 Redis 初始化"之前构造 signal_set
+    （否则阻塞期不可被 SIGTERM 终止，只能 SIGKILL）。
+ 2. 不得依赖已登记的异步信号处理器完成启动清理
+    （run() 尚未进入时它不会运行）。
+ 3. 正常关闭时，在进入 Cleanup() 之前销毁（reset）signal_set，
+    避免 io_context 已 stop 时吞掉后续终止信号。
+ 4. 失败路径同理：signal_set 的持有者必须声明在协调器**之后**，
+    使其先于协调器析构 ⇒ Cleanup 执行期间信号已恢复默认处置。
+ 5. 明确拒绝 C5：把 HSet 移到信号注册之后既不解决阻塞，又移除 SIGTERM 这条救援路径。
+```
+
+##### 12.3.18 关闭顺序与有界清理（M6.0.8，D-R20-02 / D-R20-04）
+
+###### 12.3.18.1 关闭顺序（保持既有裁决，只补有界性）
+
+```text
+1a grpc_server->Shutdown()                 K
+1b pool->Stop()                            K
+2  ShutdownWorkExecutor()                  K
+3  ClearMeetingSessionDirectory()          B
+4a redis->HDel(LOGIN_COUNT, server_name)   B（仅 registration_confirmed_ == true）
+4b redis->Close()                          K
+5  grpc_thread_.join()                     K
+```
+
+```text
+· 单 FIFO、单消费者、single-writer 约束不变（§11 / §12.1）。
+· HDel 必须在连接池真正关闭之前尝试；但它的获取与命令都有界（§12.3.16）。
+· HDel 返回失败或超时 ⇒ 记录清理失败（中性表述）并继续 4b/5；允许残留 field
+  （包括启动未确认、但实际可能已写入的 field）。
+· Close 必须能停止并 join 健康检查线程；PING 与**进行中的一次 reconnect** 都有超时
+  ⇒ 不会无限等待；停止后剩余**空闲**连接在互斥量下释放，已借出的连接由借出方释放
+  （§12.3.16 第 12–16 项）。
+· 不引入第二个消费者、不绕过 FIFO 排空、不改变 MeetingService / CServer 的所有权边界。
+```
+
+###### 12.3.18.2 4a 的启动注册门（新裁决）
+
+```text
+registration_confirmed_ 的含义：**注册成功已得到确认**（仅当启动 HSet 返回 true 才置位）。
+  · 为 true  ：正常关闭 ⇒ 4a 执行 HDel（有界 best-effort）
+  · 为 false ：启动未确认成功 / 启动失败路径 ⇒ 4a **跳过**并记录原因
+
+正确性边界（不得含糊）：
+  · false **不等于**"字段一定不存在"：若启动 HSet 在命令 I/O 超时后返回 false，
+    Redis 可能已经写入了该 field（§12.3.15.2 ④）。
+  · 因此"跳过 4a"这一**设计选择**可能留下一个实际已写入的 field；
+    该残留风险按 D-R20-02 "允许残留、如实记录"处理，**不得**声称已消除。
+  · 本设计**不**改为"失败路径无条件 HDel"：那会把一次未确认的写放大成一次未确认的删，
+    并在启动失败路径上再引入一次 Redis 阻塞暴露；C1/C2 的拒绝结论不变（§12.3.15.5）。
+
+理由：HSet 的 true 表示成功已确认；在未确认成功时再做一次 Redis 删除，
+      既不能保证删掉的就是自己写的那一个，也会增加一次阻塞暴露。
+注意：HDel 成功只表示"Redis 接受了删除命令"，不表示"字段一定曾经存在"；
+      HDel 的 false 仍不能区分四种原因（§12.3.15.2 ⑤）。
+```
+
+###### 12.3.18.3 保证边界（必须逐字保留）
+
+```text
+在本项目声明的条件下（Redis 正常 / Redis 不可达 / 空池 / 接受连接但不应答，
+且超时参数按 §12.3.16.1 生效）：
+  ✓ 启动：HSet 在有限时间内返回；失败 ⇒ 启动失败，不开放服务
+    （HSet 的 false 仅表示**未确认**；成功写入与否不由该 bool 判定）
+  ✓ 关闭：HDel 在有限时间内返回；失败 ⇒ 继续 4b/5
+  ✓ Close：能唤醒等待者并 join 健康检查线程
+
+以下**不在**保证范围内（不得声称）：
+  ✗ 任意操作系统故障、内核/驱动级永久阻塞
+  ✗ 任意底层线程永久卡死（例如被外部调试器挂起）
+  ✗ 所有 DNS 故障（redisConnectWithTimeout 不约束 getaddrinfo）
+  ✗ 单次超时等于整个启动/退出过程的总超时
+  ✗ "进程在固定时间内完成优雅关闭"这一无条件命题
 ```
 
 ### 12.4 `CServer` 改为 `shared_ptr` 的必要性与风险
@@ -2553,11 +3039,22 @@ CB-R6  handling_chat_server_id 必须等于 local_server_id，否则领域返回
 | `LogicSystem.h` / `.cpp` | adapter 成员与一次性装配；`SetMeetingSessionDirectory` / `ShutdownWorkExecutor` / `ClearMeetingSessionDirectory` | §12.1 / §12.3 / §12.5 |
 | `CServer.h` / `.cpp` | 实现 `IMeetingSessionDirectory`；新增 `FindSessionBySessionId`（`_mutex` 下 find，复制 shared_ptr） | §8.2 / §8.5 |
 | `CSession.h` / `.cpp` | 声明实现 `IMeetingLiveSession`（**仅一个 const 方法**：`DescribeSessionId()`；不改变任何发送语义） | §8.2 |
-| `ChatServer.cpp` | `CServer` 改 `make_shared`；注册目录；关闭序列（§12.3） | §12.3 / §12.4 |
+| `ChatServer.cpp` | `CServer` 改 `make_shared`；注册目录；关闭序列（§12.3）；**M6.0.8**：HSet 判真、启动失败、`signal_set` 生命周期（§12.3.17） | §12.3 / §12.4 / §12.3.17 |
+| `RedisMgr.h`（**M6.0.8 新授权，D-R20-03**） | R-20 契约：稳定 host/pwd、连接/命令超时、有界 `getConnection()`、Close 幂等、析构 join、AUTH 空回复检查与失败释放（§12.3.16） | §12.3.16 / §19.12 |
+| `RedisMgr.cpp`（**M6.0.8 新授权，D-R20-03**） | 12 个获取点的空指针/RAII/失效连接处置；AUTH 空回复检查与失败释放；重连停止检查；停止后归还连接的释放（§12.3.16 第 5/6/11/12/14 项） | §12.3.16 / §19.12 |
 | `CMakeLists.txt` | 新增 TU 到 `CHATSERVER_APPLICATION_SOURCES` | §16.5 |
-| `tests/CMakeLists.txt` | 新增 adapter TU + M6 测试文件 | §16.5 |
+| `tests/CMakeLists.txt` | 新增 adapter TU + M6 测试文件；如启用 Redis 契约 target，按 §16.5 的**实际依赖**约束（RedisConPool 级只需 hiredis；RedisMgr 级还需 ConfigMgr.cpp + Boost.Filesystem + config.ini） | §16.5 |
 | `tests/MeetingResponseNotificationAdapterTest.cpp`（**新增**） | Layer C 用例（组 1–7） | §16.2 |
 | 本文件 | 状态更新为 COMPLETE（Coding 后） | 惯例 |
+
+**M6.0.8 的 RedisMgr 授权边界（必须与 §2.5 / §15.3 一起读）**：
+
+```text
+· 仅 Server/ChatServer/ChatServer/RedisMgr.h 与 RedisMgr.cpp 在 MUST MODIFY 内。
+· Server/GateServer/**、Server/StatusServer/**、Server/ChatServer2/** 仍为 MUST NOT MODIFY，
+  即使它们存在同源缺陷（R-20 / R-19）。
+· 不得把 R-20 的修法"统一重构"到其他服务；那是另一个裁决，不在本授权内。
+```
 
 ### 15.2 MAY MODIFY（仅当代码事实证明必要）
 
@@ -2772,6 +3269,25 @@ tests/CMakeLists.txt 新增：../MeetingResponseNotificationAdapter.cpp
   ⇒ 会拉入 asio / Boost / Redis / MySQL / gRPC / jsoncpp 整条 legacy 链路
 ```
 
+```text
+M6.0.8（R-20）测试目标与依赖约束（按**实际依赖**选择最小可行方案）：
+  · 首选：直接对 `RedisConPool` 做独立测试——它定义在 RedisMgr.h 中、
+    **不依赖 ConfigMgr**，只链接 hiredis，并用受控 Redis 对端（含"accept 后不应答"）
+    覆盖：空池获取超时、Close 唤醒、停止后归还的释放、PING/AUTH 超时、Close join 有界。
+    该 target **不编译** RedisMgr.cpp。
+  · RedisMgr 的 HSet/HDel 包装行为（含真实 ConfigMgr 初始化）由现有 ChatServer
+    运行级测试覆盖（B24–B27），不强行塞进单元测试 target。
+  · 若确需**独立 RedisMgr 测试目标**，必须按实际依赖声明，**不得**假定
+    "只编译 RedisMgr.cpp / RedisMgr.h 与测试文件"就能链接与运行：
+      - 编译 `ConfigMgr.cpp`（RedisMgr.cpp 调用 `ConfigMgr::Inst()`）；
+      - 链接 `Boost.Filesystem`（ConfigMgr 用 boost::filesystem 读取 config.ini）；
+      - 在测试进程的 CWD 提供 `config.ini`（测试自行生成、不提交，见 §21.3 C6）；
+      - 否则 ConfigMgr 在首次 `Inst()` 时读不到 config.ini 会抛异常，测试不可运行。
+  · 无论采用哪种形态，都**不得并入 MeetingDomain 的 target**（MeetingDomain 保持零依赖）。
+  · 不引入新的第三方依赖或复杂测试框架；`ChatServer.cpp` 仍不进入测试 target
+    （关闭顺序由 runtime smoke + 日志断言覆盖）。
+```
+
 ### 16.6 M6 自带的回归护栏
 
 ```text
@@ -2779,6 +3295,8 @@ tests/CMakeLists.txt 新增：../MeetingResponseNotificationAdapter.cpp
 2. Layer A 中与通知无关的断言必须保持通过
 3. 整轮重复（如 200 轮）用于发现 M6 自身新竞态：
    **必须先能区分既有 flaky #1/#2 与 M6 回归**，否则产生假阳性
+4. Redis 契约测试（若启用）必须能在**无外部 Redis** 时以受控对端运行；
+   超时断言须留有余量，不得因机器负载成为新的 flaky 来源
 ```
 
 ---
@@ -2794,7 +3312,8 @@ tests/CMakeLists.txt 新增：../MeetingResponseNotificationAdapter.cpp
 | **M6.3** | `CServer::FindSessionBySessionId`（`_mutex` 下 find + 复制 shared_ptr）；`CSession` 声明实现 `IMeetingLiveSession`；组 2 用例 | 两个既有文件最小改动 | 回退 `CServer.*`/`CSession.*` |
 | **M6.4** | adapter `.h/.cpp` + `CountingNoWireCollector`；组 3/4/5 用例 | adapter 实现 | 删除 adapter 文件与用例 |
 | **M6.5** | `LogicWorkDispatcher` 增加 adapter 指针与八个调用点；保持 sink 顺序与 FINALIZE_CLOSE 入队不变；组 6/7 用例（含 OR4/OR5） | dispatcher 改动 | 回退 `LogicWorkDispatcher.*` |
-| **M6.6** | `LogicSystem` 装配 + 三个新入口；`ChatServer.cpp` 改 `make_shared` + 注册 + 关闭序列；CMake | 装配与关闭顺序 | 回退 `LogicSystem.*`/`ChatServer.cpp`/CMake |
+| **M6.6a** | **R-20 RedisMgr 契约**（D-R20-03）：稳定 host/pwd、连接/命令超时、有界 `getConnection()`、Close 幂等 + 析构 join、AUTH 空回复与释放、重连停止检查、停止后归还连接的释放、12 个获取点处置；RedisConPool 契约测试（按 §16.5 依赖约束） | `RedisMgr.h/.cpp` + 测试 | 回退 `RedisMgr.*` 与新增测试 |
+| **M6.6** | `LogicSystem` 装配 + 三个新入口；`ChatServer.cpp` 改 `make_shared` + 注册 + 关闭序列 + **HSet 判真/启动失败/signal 生命周期**（依赖 M6.6a）；CMake | 装配与关闭顺序 | 回退 `LogicSystem.*`/`ChatServer.cpp`/CMake |
 | **M6.7** | 全量验证：Linux 双配置构建、ctest（224 + 新增）、C++14 门禁、依赖隔离、runtime smoke（含目录可用证据）、整轮重复并区分既有 flaky | 验证记录 | 回退该步 |
 | **M6.8** | 文档收尾：COMPLETE、Scope Review、验证边界、已知限制、提交命令 | 文档 | 无需回退 |
 
@@ -2810,6 +3329,9 @@ M6.4：安全矩阵逐格核对；L0–L5 边界如实；无 retry/ACK；异常�
       计数不被用于业务判定；生产 collector 不调用 Send；
       **逐目标生成 + 每条 Collect 恰好一次**（§7.1.2 / §7.1.3）
 M6.5：O1–O5 顺序证明；FINALIZE_CLOSE 仍不插队；sink 观测顺序不变
+M6.6a：§12.3.16 十七条逐条对齐；不改其他服务的 RedisMgr 副本；不新增线程/依赖；
+       获取失败不空指针；失效连接不当作健康连接；Close 可重复；析构 join；
+       测试必须使用**有界**故障注入（不得构造永久阻塞用例，B23）
 M6.6：§12.3 关闭路径（**pool->Stop() 恰好一次** + ShutdownCoordinator 全生命周期覆盖 +
       信号回调只做 io_context.stop() + 每步独立 try/catch）；
       §12.5 注册时序三保证；§12.2.3 成员声明顺序；
@@ -2825,7 +3347,7 @@ M6.8：验证边界如实（§20.2），不声称端到端可用
       MeetingResponseNotificationAdapter.h/.cpp / CountingNoWireCollector(.h/.cpp) /
       tests/MeetingResponseNotificationAdapterTest.cpp
 修改：LogicWorkDispatcher.h/.cpp、LogicSystem.h/.cpp、CServer.h/.cpp、CSession.h/.cpp、
-      ChatServer.cpp、CMakeLists.txt、tests/CMakeLists.txt
+      ChatServer.cpp、RedisMgr.h/.cpp（M6.0.8 新授权）、CMakeLists.txt、tests/CMakeLists.txt
 整体回退 = 删除新增 + git checkout -- 上述既有文件
 meeting/* 零改动；FIFO/executor/internal work payload 不受影响
 ```
@@ -3059,54 +3581,86 @@ M6.0.6 的最小范围调整（后果层面）：
   handler 由 Shutdown() 负责等待其结束。
 ```
 
-### R-20：Redis 连接获取可能**无限阻塞**，Cleanup 完成性无界（既有代码性质）
+### R-20：Redis 连接获取可能**无限阻塞**，Cleanup 完成性无界
+（既有代码性质；M6.0.8 已裁决：**设计 DECIDED、实现/验证 NOT STARTED**）
 
 ```text
-【源码事实】
+【状态（M6.0.8，三件事必须分清）】
+  · 人工架构裁决：**已完成**（D-R20-01 ~ D-R20-04，§19.12）
+  · 设计基线：**已写入本文件**（§12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18）
+  · 生产代码：**未修改**；实现与验证：**NOT STARTED**
+  · Final Coding Gate：**HOLD**（R-20 未通过任何验收项，§21.2 B24–B31）
+  ⇒ 不得写成"R-20 已修复"，也不得写成"Coding Gate 已通过"。
+
+【源码事实（M6.0.8 复核；行号以当前 HEAD 02447fd 为准）】
   · RedisConPool::getConnection()（RedisMgr.h:65-80）使用**无超时**的
     cond_.wait(lock, [..]{ return b_stop_ || !connections_.empty(); })。
     ⇒ 若 connections_ 为空且 b_stop_ == false，调用线程**无限期阻塞**；
-      只有 returnConnection() 归还连接，或 Close() 置 b_stop_ 并 notify_all 才能唤醒。
+      只有 returnConnection() 归还连接、reconnect() 回填，或 Close() 置 b_stop_
+      并 notify_all 才能唤醒。
   · 连接池在构造时若所有 redisConnect/AUTH 均失败，则 connections_ **为空**，
-    且 b_stop_ == false。
-  · checkThreadPro()（RedisMgr.h:138-190）先取 pool_size = connections_.size()，
-    再 `for (i = 0; i < pool_size && !b_stop_; ++i)` 只对**已有**连接做 PING；
-    **不创建新连接** ⇒ 空池**永不重连**，永久为空。
+    且 b_stop_ == false、fail_count_ == 0。
+  · checkThreadPro()（RedisMgr.h:138-204）：
+      - **构造期空池**（fail_count_ == 0）⇒ 既不 PING 也不 reconnect ⇒ **永不恢复**；
+      - **运行期失联**（fail_count_ > 0）⇒ 即使池为空，仍每 ~60 秒尝试 reconnect()。
+    ⇒ "空池永不重连"只对前者成立（更正 M6.0.7 的绝对表述）。
+  · reconnect() 使用成员 host_/pwd_（:114/:122），而它们是 `const char*`（:254-255），
+    指向 RedisMgr 构造函数里的局部 std::string（RedisMgr.cpp:8-11）
+    ⇒ **悬垂指针 / UB**（M6.0.8 复核新增）。
   · RedisMgr::HSet()（RedisMgr.cpp:185）与 HDel()（RedisMgr.cpp:282）首句都是
-    getConnection() ⇒ 在空池下均可能**永久阻塞**。
+    getConnection() ⇒ 空池下均可能**永久阻塞**；取得连接后还可能阻塞在
+    **无命令超时**的 redisCommand 上。
+  · Close()（RedisMgr.h:106-110）不持 mutex_ 就置 b_stop_ 并 notify_all
+    ⇒ 存在丢失通知窗口；它还会 join check_thread_（PING 无超时则可能被拖住）；
+    且非幂等；~RedisConPool()（:52-54）为空、不 join。
+  · AUTH 失败分支只 freeReplyObject、不 redisFree(context) ⇒ socket 泄漏（:25-31）；
+    两处 AUTH（:25-26 / :122-123）均未判空 ⇒ 已纳入 R-20 必要范围（§12.3.16 第 11 项）。
 
-【影响】
-  · 启动期（阶段 4 HSet 阻塞）：进程挂起；阻塞不是异常，不触发栈展开 ⇒ Cleanup() 不执行。
-  · 关闭期（Cleanup 步骤 4a HDel 阻塞）：**永远到不了** 4b（Close）与 5（join）
-    ⇒ 进程挂起而非退出；而解除阻塞的手段（Close）正排在它后面，形成**死锁式关闭挂起**。
-  · 因此 M6 的"Cleanup 五步必然完成"论证**只覆盖抛异常，不覆盖不返回**
-    ⇒ **Cleanup 完成性无界**，本文件不再作更强声明（§12.3.15.4）。
-  · BestEffort() 只捕获异常，对阻塞**无效** —— 不得把 best-effort 等同于有界完成。
+【影响（当前源码）】
+  · 启动期（阶段 4 HSet 阻塞）：进程挂起；阻塞不是异常 ⇒ Cleanup() 不执行。
+  · 关闭期（4a HDel 阻塞）：**永远到不了** 4b（Close）与 5（join）
+    ⇒ 死锁式关闭挂起；且 run() 返回后 signal_set 仍存活、io_context 已 stop
+    ⇒ 后续 SIGTERM 被 Asio 吞掉，**只能 SIGKILL**。
+  · BestEffort() 只捕获异常，对阻塞**无效**。
 
-【性质与处置】
-  · 属**既有代码**性质，**不是** M6 引入；M6 的启动/关闭顺序只是**使它可被触发**
-    （Cleanup 里保留了 HDel 调用）。
-  · M6 **不修改** RedisMgr.* / RedisConPool（不在授权范围）。
-  · 候选缓解（C1–C5）见 §12.3.15.5，**留待人工裁决**，本轮不实施、也不报告为已修复。
-  · 推荐倾向 C1（取消 Cleanup 中的 HDel），但它改变"关闭时是否尝试清理登录计数"的行为，
-    因此**必须**由人工确认。
+【M6.0.8 裁决（是"裁决"，不是"实现"）】
+  · D-R20-01：Redis 是启动硬依赖 ⇒ HSet 判真；false/超时 ⇒ 启动失败并回收资源（C4 采用）
+  · D-R20-02：**保留 HDel**（C1/C2 拒绝）；HDel 是有业务语义的有界 best-effort 清理
+  · D-R20-03：**允许**修改 ChatServer 的 RedisMgr.h/.cpp（仅此二文件，§15.1 / §2.5）
+  · D-R20-04：正常条件下优雅关闭；Redis 不可用时获取与同步命令有超时边界；
+               HDel 失败后继续安全清理；**不**声称任意 OS/线程/DNS 故障下有界
+  · 采用组合：C3′（有界获取 + hiredis 连接/命令超时）+ C4 + 正确的信号生命周期
+  · C3 单独不足（只限制获取，不限制命令）；C5 拒绝（登记≠运行，且会吞 SIGTERM）
 
-【补充：Close() 自身的等待也非严格有界】
-  Close() 置 b_stop_ 并 notify_all 后会 join check_thread_；若该线程正卡在某条
-  连接的阻塞 redisCommand(PING) 上，join 会被拖住。这受 TCP 超时约束，
-  但**不是**由设计保证的有界等待 ⇒ 同样不声称有界。
+【仍未解决的验收缺口】
+  · §21.2 的 B24–B31 全部未执行（生产代码未改）。
+  · B23 的"不可测"限制已按新契约改为"可测有界故障，禁止永久阻塞用例"。
+  · 在该缺口关闭前，本文档不得出现 R-20 的 PASS 结论。
 ```
 
-### R-19：`RedisConPool` 构造中 `reply->type` 未判空（既有缺陷，M6 不修）
+### R-19：AUTH 回复未判空（既有缺陷；**空回复检查已纳入 R-20 必要范围**）
 
 ```text
-事实：RedisMgr.h:29 在 redisConnect 成功后调用
-        auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
-        if (reply->type == REDIS_REPLY_ERROR) { ... }
-      未检查 reply 是否为 nullptr。若命令执行失败返回空指针，这里会解引用空指针。
-性质：既有代码缺陷，与 M6 无关；出现在 RedisMgr/RedisConPool 的**构造期**，
-      因此属于"类 A"（单例构造期内失败），协调器无法介入（§12.3.12.3）。
-处置：如实登记；M6 **不修改** RedisMgr.h（不在授权范围内），也不声称已消除。
+事实：两处 AUTH 都在未检查 reply 的情况下读取 reply->type：
+  · 初始连接：RedisMgr.h:25-26
+  · reconnect：RedisMgr.h:122-123
+       auto reply = (redisReply*)redisCommand(context, "AUTH %s", pwd_);
+       if (reply->type == REDIS_REPLY_ERROR) { ... }
+  reply 为空（命令失败/超时）时即空指针解引用。
+
+性质：既有代码缺陷。初始连接发生在**构造期**（类 A），协调器无法介入（§12.3.12.3）；
+      reconnect 发生在健康检查线程，属于运行期。
+
+处置（M6.0.8 R2 更新）：**AUTH 空回复检查已纳入 R-20 的必要实现范围**
+（§12.3.16 第 11 项），不再是"Coding 时再决定"的遗留项：
+  · 必须：解引用前判空；
+  · 必须：失败时按实际所有权释放 reply（如存在）与 redisContext；
+  · 必须：失败进入可诊断的初始化失败 / 重连失败路径，
+    不得因空指针解引用绕过预定控制流。
+必要性来自 R-20 本身：为 AUTH 配置命令超时后，"AUTH 超时返回空回复"是必须
+正确处理的**正常失败情形**；不判空就无法同时满足"失败可诊断"与"连接不泄漏"。
+其余与本次目标无直接关系的 R-19 方面（更一般的错误分类、重试策略等）仍可延期。
+在实现与验证完成前，仍**不**声称 R-19 已消除。
 ```
 
 ### R-15：Windows 门禁被误报
@@ -3333,14 +3887,18 @@ F4 是本项目对一条既有裁决（R-17"完全不修"）的**最小范围调
 | G1 `BuildAndStart` 返回类型 | 目标代码写 `grpc::Server* raw = builder.BuildAndStart();` —— unique_ptr 不能隐式转裸指针，**不可编译** | 改为 `auto g = builder.BuildAndStart();`（原生 `std::unique_ptr<grpc::Server>`）→ 判空 → `SetGrpcServer(std::move(g))`；并说明**不存在**额外包装/控制块分配 | grpcpp/server_builder.h:104（v1.51.1） |
 | G2 Redis 阻塞语义 | 只区分"返回 false"与"抛异常"，未识别"调用不返回"；`BestEffort()` 被当作完成性保证 | 新增 §12.3.15（三种失败形态 + 源码逐条核实 + 候选 C1–C5）；新增 R-20；F5b 记录"HSet 不返回"路径；**明确收回"Cleanup 五步必然完成"的强声明** | RedisMgr.h:65-110/138-190、RedisMgr.cpp:185/282 |
 
-**G2 的性质声明（必须保留）**：
+**G2 的性质声明（M6.0.7 当时成立；其中两项已被 M6.0.8 的 D-R20-03 取代，见 §19.12）**：
 
 ```text
 · R-20 是**既有代码**性质，不是 M6 引入；M6 只是让它在清理路径上**可被触发**
   （Cleanup 中保留了 HDel）。
 · M6 **不修改** RedisMgr.* —— 消除该风险需要改 API（C3/C4），超出本轮授权。
+  ⚠ M6.0.8 更新：D-R20-03 已把 ChatServer 的 RedisMgr.h/.cpp 纳入授权（§19.12）；
+    本句只描述 M6.0.7 当时的授权状态，**不再是当前规范**。
 · 因此 M6 **不**提供 Redis 操作的有界完成保证，也**不**声称 Cleanup 必然走完五步。
+  ⚠ M6.0.8 更新：目标是在声明条件下有界（§12.3.18.3）；实现前仍不作有界声明。
 · C1–C5 仅供人工裁决；本轮**未**选定、**未**实施、**未**报告为已修复。
+  ⚠ M6.0.8 更新：C1–C5 已裁决（§12.3.15.5）；实现与验证仍未开始。
 ```
 
 **Phase 1 仍然完全冻结**：G1–G2 同样是文档内部一致性与实现可行性修正，
@@ -3348,6 +3906,35 @@ F4 是本项目对一条既有裁决（R-17"完全不修"）的**最小范围调
 
 **Phase 1 仍然完全冻结**：以上五项均为文档内部一致性与实现可行性修正，
 **没有**修改、豁免或放宽 Phase 1 的任何条款。
+
+### 19.12 M6.0.8 追加的裁决（R-20 架构决策）
+
+| 项 | 裁决 | 内容 | 落地章节 |
+| --- | --- | --- | --- |
+| **D-R20-01** | Redis 是**启动硬依赖** | 在 gRPC/TCP 对外开放之前完成 Redis 初始化与 `HSet`；**判真**；false / 无可用连接 / 超时 ⇒ 启动失败（false = 未确认，**可能已写入**）；失败路径回收已创建线程与资源 | §12.3.7 / §12.3.12.2 / §12.3.17.2 / §21.2 B25 |
+| **D-R20-02** | **保留 HDel** | 拒绝 C1/C2；HDel 是**有界 best-effort** 清理，且**有业务语义**（StatusServer 用该 hash 的计数选路）；失败允许残留 field（含启动未确认时可能已写入的 field），但必须如实记录、不得声称已消除 | §12.3.5.1 / §12.3.9 / §12.3.15.5 / §12.3.18 |
+| **D-R20-03** | **扩大 RedisMgr 修改授权** | 仅 `Server/ChatServer/ChatServer/RedisMgr.h` 与 `RedisMgr.cpp`；不得改 GateServer / StatusServer / ChatServer2；不得统一重构 | §2.5 / §15.1 / §12.3.16 |
+| **D-R20-04** | **关闭完成性目标** | 正常条件下优雅关闭；关闭期 Redis 不可用时获取与同步命令有超时边界；HDel 失败后继续安全清理；**不**要求任意 OS / 线程 / DNS 故障下有界 | §12.3.17.3 / §12.3.18.3 / §20.2 / §21.2 |
+
+**方案取舍（与 §12.3.15.5 同步）**：
+
+```text
+C1 拒绝；C2 拒绝；C3 单独不充分；C4 采用（作为硬依赖策略）；C5 拒绝。
+采用组合：C3′（有界连接池获取 + hiredis 连接/命令超时）+ C4 + 正确的信号生命周期管理。
+明确不声称：该组合能保证所有系统故障下进程绝对有界退出。
+```
+
+**性质与状态（必须保留）**：
+
+```text
+· 本轮只改文档；生产代码 / 测试 / CMake / Phase 1 文档零修改。
+· R-20：设计 DECIDED；实现与验证 NOT STARTED。
+· Final Coding Gate：HOLD —— 直到 §21.2 的 B24–B31 全部执行并通过。
+· 不得把"设计已裁决"写成"R-20 已修复"，也不得写成"Coding Gate 已通过"。
+```
+
+**Phase 1 仍然完全冻结**：D-R20-01 ~ D-R20-04 是 M6 范围内的实现方式选择，
+没有修改、豁免或放宽 Phase 1 的任何条款。
 
 ---
 
@@ -3386,6 +3973,15 @@ F4 是本项目对一条既有裁决（R-17"完全不修"）的**最小范围调
 (c) 通知的**送达**不可验证（L5）；异步写失败不可验证（L4）。
 (d) 真实字节交付**未实现**（Phase 3）。
 (e) Windows 侧一切结论均不可在 Linux 环境验证。
+(f) R-20 的有界性只在本项目声明的条件下验证（Redis 正常 / 不可达 / 空池 /
+    accept 后不应答，且超时生效）；**不**覆盖任意 OS 故障、内核级永久阻塞、
+    任意线程被挂起、所有 DNS 故障（§12.3.18.3）。
+(g) 超时参数（获取 1 s / 连接 1 s / 命令 2 s）是**初始建议**，须由测试确认；
+    不是生产级 SLA。
+(h) Redis 恢复只在"运行期 fail_count_ > 0"的情形下有重试路径；
+    "构造期空池"不恢复（D-R20-01 下等价于启动失败，而不是自愈）。
+(i) M6.0.8 只写设计契约；在 Coding 与 §21.2 B24–B31 完成前，
+    R-20 的一切行为性结论均为**未验证**。
 ```
 
 ---
@@ -3426,18 +4022,23 @@ A19  MeetingNotificationMessage 每条构造都显式赋值非空 notification_t
 A20  命名契约：示例中 gRPC 对象为 grpc_server、TCP 对象为 tcp_server，
      不存在名为 server 的 TCP 对象；且**不调用** CServer::Shutdown()（该方法不存在）
 A21  构造/启动顺序与目标代码逐项一致（§12.3.6.2），且该顺序本身承载异常安全：
-       阶段 0  io_context / signals / service          （均不启动线程）
+       阶段 0  io_context / service                    （均不启动线程；**不构造 signal_set**）
        阶段 1  ShutdownCoordinator（**空依赖**）        ← 早于 pool/Redis/BuildAndStart
+       阶段 1.5 signals 持有者（unique_ptr）只声明、不构造 ← 声明在协调器之后（§12.3.6.1(4)）
        阶段 2  pool = GetInstance()   → SetPool()       ← 构造即启动 _threads
        阶段 3  redis = GetInstance()  → SetRedis()      ← 构造即启动 check_thread_
-       阶段 4  redis->HSet(...)
+       阶段 4  redis->HSet(...) → **判真**；false/超时 ⇒ 抛启动失败 → MarkRegistrationConfirmed()
        阶段 5  g = BuildAndStart()（返回 unique_ptr）→ 判空（空 ⇒ 抛）→ SetGrpcServer(move(g))
        阶段 6  tcp_server = make_shared<CServer>() → SetTcpServer()
        阶段 7  a) logic = LogicSystem::GetInstance().get() → SetLogicSystem(logic)
                b) logic->SetMeetingSessionDirectory(tcp_server)   （noexcept 契约）
-       阶段 8  signals.async_wait(...)                  （只唤醒，不清理）
+       阶段 8  signals = make_unique<signal_set>(...)；signals->async_wait(...)（只唤醒，不清理）
        阶段 9  StartGrpcThread()                        ← 最后启动
-       阶段 10 io_context.run()；异常路径先显式 Cleanup() 再 rethrow
+       阶段 10 io_context.run()；**先 signals.reset()**，再显式 Cleanup()；
+               异常路径同样先 reset 再 Cleanup 后 rethrow
+      M6.0.8 追加意义：Redis 初始化早于 signal_set 构造（启动阻塞期保留默认终止处置）；
+                      Cleanup 前销毁 signal_set（关闭阻塞期不吞 SIGTERM）；
+                      HSet 判真 ⇒ 启动硬依赖（D-R20-01 / D-R20-04，§12.3.17）
      异常安全意义：阶段 1 早于阶段 2/3 ⇒ 后台线程一启动就已有责任归属；
                    阶段 2/3 的 GetInstance 返回后紧跟 noexcept 登记 ⇒ 无异常窗口；
                    阶段 5：BuildAndStart 的返回类型**本身就是 unique_ptr**（无额外包装、
@@ -3458,6 +4059,8 @@ A22  清理步骤按级别使用两个包装，且**不存在**名为 Step() 的
      被安全跳过，因此"协调器先建、资源后登记"不会产生空指针解引用。
      注：`BuildAndStart()` 返回 nullptr 时**不再**走到"空指针跳过" ——
      阶段 5 立即抛异常，Cleanup 只因步骤 1a 找不到 Server 而跳过（§12.3.13 D-4）。
+     另（M6.0.8）：4a 还受 `registration_confirmed_` 门控——启动 HSet 未确认时
+     **跳过** HDel 并记录原因（§12.3.18.2）。
      另注：`BuildAndStart()` 的返回类型是 `std::unique_ptr<grpc::Server>`（非裸指针），
      目标代码不得出现 `grpc::Server*` 接收或隐式转换（§12.3.5.3）。
      全部 setter 的 noexcept 依据见 §12.3.5.3 的表（含 unique_ptr 移动）。
@@ -3482,8 +4085,10 @@ A23  所有权形态（M6.0.6 修正）：
 A24  gRPC 线程由协调器**按值**持有（成员 `std::thread`），不是指向局部变量的裸指针；
      且 `StartGrpcThread()` 位于所有可能失败的初始化之后（§12.3.5 / §12.3.6）
 A25  信号回调仅调用 `io_context.stop()`，不调用 pool->Stop / ShutdownWorkExecutor /
-     grpc_server->Shutdown（静态检查）
+     grpc_server->Shutdown（静态检查）；
+     且 signal_set 在阶段 8（Redis 初始化之后）才构造，并在 Cleanup 之前销毁（§12.3.17.3）
 A26  清理步骤已分级：1a/1b/2/4b/5 为 K 级（失败 fail-stop），3/4a 为 best-effort；
+      4a 额外受 `registration_confirmed_` 门控；`Close()` 的"可重复"不等于 Cleanup 重试（A28）
      不存在"关键步骤失败后仍继续"的代码路径（§12.3.5.1 / §12.3.9）
 A27  强引用论证必须是**分阶段**的，不得过度声称：
        · `SetXxx()` 之前：对应成员为空、协调器不持有该对象（此阶段失败时不得声称它仍存活）
@@ -3493,14 +4098,33 @@ A27  强引用论证必须是**分阶段**的，不得过度声称：
      全文不得出现"tcp_server 的生产期覆盖协调器从构造到析构全过程"这类表述
      （协调器在阶段 1 就存在，早于上述全部对象）（§12.3.8.1）
 A28  不对 `pool->Stop()` / `RedisMgr::Close()` 做任何重试；
-     失败路径只有 fail-stop，没有"再试一次"（§12.3.5.2）
+     失败路径只有 fail-stop，没有"再试一次"（§12.3.5.2）。
+     M6.0.8 区分两件事：**Close() 自身必须可安全重复调用**（幂等，用于析构兜底路径），
+     但 **Cleanup 不重试** —— 可重复是为了安全，不是为了再试一次（§12.3.16 第 8 项）
 A29  `BuildAndStart()` 的返回类型与 gRPC v1.51.1 一致：
      `std::unique_ptr<grpc::Server>`（grpcpp/server_builder.h:104）；
      目标代码**不得**出现 `grpc::Server* x = builder.BuildAndStart()` 这类隐式转换，
      也不得再用 `shared_ptr<grpc::Server>(BuildAndStart())` 包装（§12.3.5.3）
 A30  Redis 调用的三种失败形态（返回失败 / 抛异常 / **不返回**）在文档中明确区分；
-     `BestEffort()` 不得被描述为"有界完成"；Cleanup 完成性不得被声明为有界
-     （§12.3.5.1 / §12.3.15 / R-20）
+     `BestEffort()` 不得被描述为"有界完成"。
+     M6.0.8 更新：Cleanup 的完成性**允许**在 §12.3.18.3 声明的条件下声明为有界
+     （Redis 正常 / 不可达 / 空池 / accept 后不应答，且超时生效）；
+     **不得**声明为"任意 OS/线程/DNS 故障下有界"，也不得把单次超时当作总超时
+     （§12.3.5.1 / §12.3.15 / §12.3.18.3 / R-20）
+A31  RedisMgr 契约（M6.0.8，§12.3.16）静态可核：
+       · host/pwd 以稳定生命周期对象保存（不再保存构造函数局部变量的指针）；
+       · 初始连接与 reconnect 均使用连接超时；所有连接均设置命令 I/O 超时；
+       · getConnection() 为有界等待，超时返回 nullptr；
+       · RedisMgr.cpp 的每个获取点先判空，且提前返回路径不泄漏连接；
+       · 失效连接不被 returnConnection() 当作健康连接；
+       · Close() 在持 mutex_ 时置停止标志并 notify；Close() 可重复调用；
+       · ~RedisConPool() 在必要时 join check_thread_；
+       · AUTH（初始与 reconnect）解引用前判空，失败时释放 reply/context 并进入可诊断失败路径；
+       · 健康检查每次重连前检查停止状态，停止后不再开始新重连；
+       · returnConnection() 在停止后释放（而非静默丢弃）context；
+       · Close()/析构只释放空闲队列中的连接，且不与借用者并发释放同一连接
+A32  R-20 的状态表述可核：文档中不存在"R-20 已修复 / 已通过 / Coding Gate 已通过"的现行声明；
+     §12.3.15.5 的 C1/C2/C5 为"拒绝"、C3 为"单独不充分"、C4 为"采用"（§19.12）
 A13  message.proto / *.sln / *.vcxproj / *.props / *.filters / MyChat_Qt / ChatServer2 零改动
 A14  Phase 1 文档零改动
 ```
@@ -3536,10 +4160,12 @@ B17  gRPC 线程必被 join：分别注入（a）HSet 抛异常、（b）BuildAn
      注：**不设**"目录注册抛异常"用例——`SetMeetingSessionDirectory` 契约为 noexcept（§12.3.5.3）
 B17b 类 A 不被误称已覆盖：构造一个 `GetInstance()` 抛异常的变体（可用替身），
      断言文档/实现**不**声称该情形已被清理（该用例只验证"不误报"，不验证"安全"——
-     因为类 A 的安全性依赖修改 AsioIOServicePool/RedisMgr，M6 明确不做）
+     因为类 A 的安全性依赖修改 AsioIOServicePool；RedisMgr 侧已由 D-R20-03 授权，
+     但实现未开始，仍不得据此声称 A-2 已覆盖）
 B18  pool->Stop() 与 Redis Close() 在整轮 smoke 中各只执行一次
 B19  信号路径：发送 SIGTERM 后，清理日志顺序为
-     grpc Shutdown → pool Stop → ShutdownWorkExecutor → ClearDirectory(HDel) → redis Close → join
+     grpc Shutdown → pool Stop → ShutdownWorkExecutor → ClearMeetingSessionDirectory
+     → redis HDel（仅注册已确认时）→ redis Close → grpc join
 B20  顺序不变量：Redis 的 HDel/Close 在日志中晚于 grpc Shutdown 与 ShutdownWorkExecutor
      （守护 R-18'a；若顺序被改动则该用例失败）
 B21  fail-stop 行为：注入 join 失败（可用测试替身）时，进程以非零信号终止，
@@ -3554,13 +4180,29 @@ B22  兜底路径覆盖真实初始化失败点：至少选两个点注入异常
      注：**不**使用"目录注册抛异常"作为注入点（该 API 为 noexcept 契约）
      注：**不要**用"run() 抛异常但不调用 Cleanup"作为该用例的构造方式——
      run() 抛异常路径**会**显式调用 Cleanup()（§12.3.7），不属于兜底路径
-B23  （阻塞情形**不可测**：不得在测试中构造"getConnection 永久阻塞"的用例，
-     否则测试永久挂起；阻塞语义由 §12.3.15 的**静态论证**覆盖，见 R-20）
-     HDel 返回值语义（按 RedisMgr.cpp:282-306 的四种 false 来源分别构造）：
-       (i) 无可用连接 (ii) redisCommand 返回空 (iii) reply 非 INTEGER (iv) integer==0
-     对每种 false：断言关闭流程**继续**、诊断信息为**中性**表述（不出现
-     "field 不存在"或"连接失败"式的断言性结论），且仍正常到达 4b（Close）与 5（join）
-     —— 即 `false` 未被误判为致命，也未被误判为"字段一定不存在"
+B23  **有界故障可测，永久阻塞不可测**（M6.0.8 更新）：
+     · 允许（且要求）构造"有界故障"：例如假 Redis 对端 accept 后不应答，
+       断言 getConnection / HSet / HDel 在超时预算内返回 false，而不是永久挂起；
+     · **禁止**构造"无超时永久阻塞"的用例（否则测试挂起）；该情形只由静态论证覆盖；
+     · HDel 返回值语义仍按四种 false 来源分别构造（无可用连接 / 命令失败（超时）/
+       reply 非 INTEGER / integer==0），断言关闭流程继续、诊断中性、仍到达 4b/5；
+     · 断言 4a 在 `registration_confirmed_ == false` 时被**跳过**并记录原因（§12.3.18.2）
+B24  Redis 正常：启动成功、启动 HSet 成功、服务可正常工作（D-R20-01 正例）
+B25  Redis 启动不可用：有限等待后**明确失败**，不开放服务（无 gRPC/TCP 监听），
+     且不因遗留 joinable thread 触发 std::terminate（覆盖 pool 线程与 check_thread_）；
+     并断言诊断**不**声称"字段一定不存在"（false 仅表示未确认，§12.3.15.2 ④）
+B26  正常 SIGTERM：关闭流程完成；HDel 成功时删除对应 field；工作队列按既定规则排空；
+     必须回收的线程（pool / worker / Redis check_thread_ / gRPC Wait）全部 join
+B27  Redis 关闭期不可用：HDel 的获取或命令执行失败（超时）后，仍继续 4b（Close）与 5（join），
+     并记录中性清理失败诊断；进程正常退出
+B28  连接池为空：`getConnection()` 按约定超时返回 nullptr；Close() 可以通知等待者退出
+     （含"Close 在持有 mutex_ 时置位并 notify"的可重复性验证）
+B29  健康检查与重连：正常情况下 PING/重连可用；关闭期间不会因为无限阻塞的 PING
+     而永久无法 join（用有界故障注入验证，不构造永久阻塞）
+B30  构建与回归：既有构建通过；既有 224 个测试一个不改、一个不少；新增测试不破坏
+     MeetingDomain 的依赖隔离（MeetingDomain 仍零依赖）
+B31  压力测试：在正常 Redis 环境下持续处理目标负载，未出现明显死锁、异常终止或线程泄漏
+     （有限时长与有限并发，不要求穷举极端组合）
 ```
 
 ### 21.3 工程类
@@ -3569,9 +4211,13 @@ B23  （阻塞情形**不可测**：不得在测试中构造"getConnection 永�
 C1  Linux out-of-tree 全新构建 PASS（BUILD_TESTING=ON 与 OFF）；不得新增警告
 C2  ctest 全绿；用例总数 = 224 + M6 新增数（必须给出该数字）
 C3  C++14 门禁：新文件在 -std=c++14 -pedantic-errors 下通过；无 C++17 能力
-C4  依赖隔离：MeetingDomain 仍不链接任何东西；adapter TU 不引入新第三方依赖
+C4  依赖隔离：MeetingDomain 仍不链接任何东西；adapter TU 不引入新第三方依赖；
+    Redis 契约测试按 §16.5 的实际依赖方案：RedisConPool 级 target 只链接 hiredis；
+    若建 RedisMgr 级 target，必须编译 ConfigMgr.cpp、链接 Boost.Filesystem 并提供 config.ini；
+    任何 Redis 测试 target 都不得并入 MeetingDomain
 C5  runtime smoke：起停正常；无 terminate/abort/exception；
-    含"adapter 已注入 + 目录可用"的可观测证据；检查关闭顺序日志
+    含"adapter 已注入 + 目录可用"的可观测证据；检查关闭顺序日志；
+    M6.0.8 追加：Redis 正常 / 不可用两态各跑一次（B24 / B25 / B27）
 C6  仓库内无 build artifact / config.ini / 日志 / 密码
 C7  Windows Debug|x64：**NOT VERIFIED**（Conflict #3 裁决 iii），不得声称通过
 ```
@@ -3581,7 +4227,7 @@ C7  Windows Debug|x64：**NOT VERIFIED**（Conflict #3 裁决 iii），不得声
 ```text
 D1  本文档状态更新为 COMPLETE，补入实际改动清单、测试结果、验证边界、已知限制
 D2  如实记录"真实字节交付仍留 Phase 3"（§7.5）
-D3  如实记录 §20.2 的五条验证边界
+D3  如实记录 §20.2 的九条验证边界
 D4  任何对 §15 Scope Matrix 的偏离必须逐条记录并获得授权
 ```
 
@@ -3615,6 +4261,7 @@ R6                          = **DEFERRED → 独立任务**
   CSession.h/.cpp           : UTF-8（M5 §7.2 授权转换）
   ChatServer.cpp            : UTF-8 带 BOM（现有文件；修改时需保持）
   AsioIOServicePool.h/.cpp  : **GBK**（既有；M6 不修改）
+  RedisMgr.h/.cpp           : **GBK**（既有；M6.0.8 授权修改，**必须保持 GBK**，不得转码）
 M6 不主动转换任何既有文件编码。
 ```
 
@@ -3644,8 +4291,10 @@ M6 不主动转换任何既有文件编码。
     MyChat_Qt/ / Server/ChatServer2/                                → §15.3
 14. 不改既有 7 个测试文件、不减少既有 224 个测试                      → B2
 15. 不引入新的第三方依赖、不使用 C++17 能力                          → §7 / C3
-16. 不在本步（M6.0）实现任何代码                                    → §2.3
+16. 不在本步（M6.0）实现任何代码；M6.0.8 同样只改文档            → §2.3 / §2.5
 17. 不把本轮的裁决描述为"Phase 1 已被修改"                          → §1.4 / §19
+18. 不声称 Redis 相关调用在任意 OS 故障 / 任意线程永久卡死 / 所有 DNS 故障下
+    都有界完成（只按 §12.3.18.3 声明的条件）                        → D-R20-04
 ```
 
 ---
@@ -3683,6 +4332,11 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 若 worktree 仍有本文件修改 ⇒ 仅工作区、未提交。
 ```
 
+```text
+⚠ M6.0.8 例外：本任务**不授权** add/commit/push，因此本轮不得填写"已执行"。
+   §24.4 只适用于明确授权的轮次；M6.0.8 的实际状态见 §24.5。
+```
+
 ### 24.2 发布状态的判定规则（不使用内嵌 hash）
 
 ```text
@@ -3711,7 +4365,20 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
     M6.0.4 = 8653a69
     M6.0.5 = b116ccc
     M6.0.6 = a761039
+    M6.0.7 = 02447fd
 任何"当前 HEAD = 上述任一 hash"的表述均属过期，不得沿用。
+```
+
+### 24.5 M6.0.8 的基线（本轮实测）
+
+```text
+进入本轮的远端基线 : origin/dev == HEAD == 02447fd507836d3f78bc0be8a24cb225bc91eb48
+                     ⇒ M6.0.7 已发布
+进入本轮时状态     : working tree / index 均 clean；git diff --check 为空
+本轮修改           : 仅 docs/phase2/M6-response-notification-adapter.md
+本轮 add/commit/push: **未执行**（本任务明确禁止提交与推送）
+本轮生产代码/测试/CMake: 零修改
+本轮 R-20 状态     : 设计 DECIDED；实现与验证 NOT STARTED；Final Coding Gate HOLD
 ```
 
 ---
@@ -3719,8 +4386,15 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 ## 25. 下一步
 
 ```text
-1. 人工 Review 本修订，确认 §19 的四个裁决；
-2. 按 §17.1 切分为独立的 M6.1–M6.8 Coding Prompt；
+1. 人工 Review 本修订（M6.0.8），确认 §19.12 的 D-R20-01 ~ D-R20-04；
+   注意：批准"设计"≠ 批准 Coding —— Final Coding Gate 仍为 **HOLD**；
+2. 按 §17.1 切分为独立的 M6.1–M6.8 Coding Prompt（含新增 **M6.6a**：R-20 RedisMgr 契约）；
 3. 每步完成 → Review → Build → Test → 再进入下一步；
    不得把 M6.1–M6.8 合并成一个 Prompt（STEP-1.6 §26.2 同一纪律）。
+
+R-20 从 HOLD 解除的前置条件（缺一不可）：
+  · M6.6a 实现完成，§12.3.16 的十七条契约逐条可核（§21.1 A31）；
+  · M6.6 完成 HSet 判真 / 启动失败 / signal 生命周期（§12.3.17，A21/A25）；
+  · §21.2 的 B23–B31 全部执行并通过，且不出现 std::terminate / 永久挂起；
+  · 在上述完成前，不得出现 R-20 的 PASS 结论，也不得批准 Final Coding Gate。
 ```
