@@ -4,6 +4,14 @@
 #include "ConfigMgr.h"
 #include "UserMgr.h"
 #include "ChatGrpcClient.h"
+// M6.6：本编译单元是 ~LogicSystem / ShutdownWorkExecutor / 装配代码的所在处，
+// 因此必须在这里看到被 unique_ptr 独占拥有的两个具体类型的**完整定义**
+// （LogicSystem.h 只做前向声明，避免把 adapter/collector 头文件传染给所有使用者）。
+// 两者都只依赖 C++ 标准库 + 纯领域头文件，不引入 asio / Redis / gRPC。
+#include "CountingNoWireCollector.h"
+#include "MeetingResponseNotificationAdapter.h"
+// M6.6：SetMeetingSessionDirectory 的形参类型；也是 CServer 实现的接口。
+#include "MeetingOutboundChannel.h"
 
 LogicSystem::LogicSystem() {
 	RegisterCallBacks();
@@ -413,11 +421,88 @@ void LogicSystem::EnsureWorkQueueStarted() {
 		// 不参与持久化，也不是网络协议字段。
 		_local_server_id = "local-chatserver";
 
+		// -------------------------------------------------------------------
+		// M6.6（§12.1 / §12.2.5）：出站四件套在**同一个** call_once 内按依赖顺序装配。
+		//
+		// 构造顺序 == 声明顺序（§12.2.3）：
+		//   collector → adapter(引用 collector + 弱目录) → dispatcher(注入 adapter)
+		//   → executor(引用 dispatcher 并启动唯一 worker)
+		//
+		// 保证：
+		//   1. collector / adapter 都是**成员**，不是本函数的局部对象
+		//      （局部对象会在 call_once 结束时析构，adapter 立即持悬垂引用 —— R-13）；
+		//   2. dispatcher 拿到的 adapter 指针在其整个生命周期内有效
+		//      （_meeting_adapter 声明在 _dispatcher 之前 ⇒ 更晚析构）；
+		//   3. executor 的 handler 引用指向 _dispatcher，而 _dispatcher 声明在
+		//      _work_executor 之前 ⇒ 更晚析构；
+		//   4. 唯一 worker 线程在 SerializedWorkExecutor 构造体**最后**启动，
+		//      此时上述三个依赖对象都已构造完成 ⇒ 不存在"线程先跑、依赖未就绪"；
+		//   5. 目录弱引用必须在这一次装配之前写入（main 在 io_context.run() 之前调用
+		//      SetMeetingSessionDirectory）。否则 adapter 拷到的是空弱引用，
+		//      出站会永远 no-op（R-3 的静默失效形态）。
+		// -------------------------------------------------------------------
+		_outbound_collector.reset(new CountingNoWireCollector());
+
+		_meeting_adapter.reset(new MeetingResponseNotificationAdapter(
+			*_outbound_collector, _meeting_session_directory));
+
+		// 第四参数 = **真实** adapter（不是 nullptr）：M6.5 的七个调用点因此生效。
 		_dispatcher.reset(new LogicWorkDispatcher(
-			_local_server_id, MakeSystemMeetingWorkDependencies(), nullptr));
+			_local_server_id, MakeSystemMeetingWorkDependencies(), nullptr,
+			_meeting_adapter.get()));
 
 		_work_executor.reset(new SerializedWorkExecutor<LogicWorkDispatcher>(*_dispatcher, this));
 	});
+}
+
+// ---------------------------------------------------------------------------
+// M6.6：Session Directory 的判活弱引用（§8.4 / §12.5 / §12.5(c)）
+//
+// 只保存 weak_ptr：LogicSystem 不拥有 CServer；CServer 由 main 的 shared_ptr
+// 持有，并由关闭协调器另持一份强引用以覆盖 Cleanup 期间。
+//
+// 一次性语义：重复注册**不替换**已注册目录。这不是为了容错，而是为了避免
+// "adapter 已经拷走了旧弱引用、而 LogicSystem 换成新目录"这种不可观测的分裂。
+// ---------------------------------------------------------------------------
+void LogicSystem::SetMeetingSessionDirectory(
+	std::shared_ptr<IMeetingSessionDirectory> directory) noexcept {
+	if (_meeting_session_directory_registered) {
+		// 已在一次性注册中接受过目录：保持首个注册值不变（noexcept 路径，不打日志）。
+		return;
+	}
+	// weak_ptr 的赋值是 noexcept（只复制控制块），因此本函数确实不会抛。
+	_meeting_session_directory = directory;
+	_meeting_session_directory_registered = true;
+}
+
+// ---------------------------------------------------------------------------
+// M6.6：停止并排空唯一 executor（关闭协调器的 K 级步骤 2）
+//
+// 刻意**不**捕获异常：StopAndJoin 的失败意味着 worker 可能仍可 join，
+// 属于"不能继续析构"的关键失败，必须上抛给协调器的 Fatal() 去 fail-stop，
+// 而不是在这里吞掉后让关闭流程假装成功。
+//
+// 语义与 ~LogicSystem 的兜底调用完全一致（同一实现）：先 RequestStop 再排空，
+// 锁外 join；内部入队通道保证 Close 派生的 FINALIZE_CLOSE 不会被丢弃。
+// ---------------------------------------------------------------------------
+void LogicSystem::ShutdownWorkExecutor() {
+	if (_work_executor) {
+		_work_executor->StopAndJoin();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M6.6：清除 Session Directory 弱引用（关闭协调器的 B 级步骤 3）
+//
+// 位置约束：**必须**在 ShutdownWorkExecutor() 成功之后。drain 期间仍可能有
+// FINALIZE_CLOSE 需要 lookup，提前清除会让它们全部变成 no-op。
+//
+// 边界声明：本函数只清 LogicSystem 自己保存的那一份弱引用。adapter 内部保存的是
+// 构造时**拷贝**的弱引用，本函数既不能也不需要去修改它；worker 已 join ⇒
+// 已经不存在使用该目录的消费者。
+// ---------------------------------------------------------------------------
+void LogicSystem::ClearMeetingSessionDirectory() noexcept {
+	_meeting_session_directory.reset();
 }
 
 void LogicSystem::RouteExternalMessage(const std::shared_ptr<LogicNode>& msg) {
@@ -498,9 +583,11 @@ LogicSystem::~LogicSystem() {
 	// 因此 Close 在执行中排入的 FINALIZE_CLOSE 不会被静默丢弃；stop 之后新增的外部
 	// work 会被队列拒绝（LogicWorkQueue::Push 返回 false）。
 	// StopAndJoin 内部绝不持有队列锁去 join。
-	if (_work_executor) {
-		_work_executor->StopAndJoin();
-	}
+	//
+	// M6.6：与关闭协调器的 K 级步骤 2 走**同一实现**（ShutdownWorkExecutor），
+	// 因此显式停止与析构兜底的行为不可能漂移。析构体隐式 noexcept ⇒ 若
+	// StopAndJoin 抛异常，这里会 terminate（与 M4 起的既有行为一致，未改变）。
+	ShutdownWorkExecutor();
 }
 
 bool LogicSystem::isPureDigit(const std::string& str)

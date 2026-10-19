@@ -3056,3 +3056,412 @@ TEST(DispatcherAdapterIntegration, ORD_CallSitesKeepSinkBeforeAdapter) {
     EXPECT_EQ(CountOccurrences(code, "void InvokeAdapterGuarded("),
               static_cast<std::size_t>(1));
 }
+
+// ==============================================================================
+// M6.6：装配与生命周期契约（静态核对 §8.2 的不可运行项）
+//
+// 为什么这些是**静态**用例而不是 runtime 用例：
+//   LogicSystem.cpp / ChatServer.cpp 会拉起 asio + Boost + Redis + MySQL + gRPC +
+//   jsoncpp 整条 legacy 链路（§16.5 明确它们不进入测试 target）。因此本 target
+//   对这两个文件只能做**源码级结构核对**；真实启停、SIGTERM、失败注入属 M6.7
+//   runtime smoke，本轮不在此处冒充通过。
+//
+// 这些用例读的都是**真实生产源码**（路径来自 CHATSERVER_SOURCE_DIR），
+// 且都做过"改坏实现即失败"的变异核对（见 M6.6 报告）。
+// ==============================================================================
+
+namespace {
+
+const char* const kLogicSystemHeaderPath = CHATSERVER_SOURCE_DIR "/LogicSystem.h";
+const char* const kLogicSystemSourcePath = CHATSERVER_SOURCE_DIR "/LogicSystem.cpp";
+const char* const kChatServerMainPath = CHATSERVER_SOURCE_DIR "/ChatServer.cpp";
+const char* const kServerHeaderPath = CHATSERVER_SOURCE_DIR "/CServer.h";
+const char* const kDispatcherHeaderPath = CHATSERVER_SOURCE_DIR "/LogicWorkDispatcher.h";
+const char* const kPoolSourcePath = CHATSERVER_SOURCE_DIR "/AsioIOServicePool.cpp";
+
+// 取出 [start_marker, end_marker) 之间的片段（end 不含）。找不到时返回空串。
+std::string Between(const std::string& text,
+                    const std::string& start_marker,
+                    const std::string& end_marker) {
+    const std::size_t start = text.find(start_marker);
+    if (start == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t end = text.find(end_marker, start + start_marker.size());
+    if (end == std::string::npos) {
+        return text.substr(start);
+    }
+    return text.substr(start, end - start);
+}
+
+// 断言 ordered 中每个标记都出现在给定窗口里，且位置严格递增。
+void ExpectInOrder(const std::string& window,
+                   const std::vector<std::string>& ordered,
+                   const std::string& context) {
+    std::size_t previous = 0;
+    bool first = true;
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+        const std::size_t position = window.find(ordered[i]);
+        EXPECT_NE(position, std::string::npos)
+            << context << ": missing marker [" << ordered[i] << "]";
+        if (position == std::string::npos) {
+            return;
+        }
+        if (!first) {
+            EXPECT_LT(previous, position)
+                << context << ": out of order at [" << ordered[i] << "]";
+        }
+        previous = position;
+        first = false;
+    }
+}
+
+}  // namespace
+
+// ------------------------------------------------------------------------------
+// ASM1：LogicSystem 的四个出站对象——声明顺序与构造顺序都必须是
+//       collector → adapter → dispatcher → executor，且 dispatcher 注入**真实** adapter。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM1_OwnershipOrderAndRealAdapterInjection) {
+    const std::string header = StripComments(ReadSourceFile(kLogicSystemHeaderPath));
+    const std::string source = StripComments(ReadSourceFile(kLogicSystemSourcePath));
+    ASSERT_FALSE(header.empty()) << "cannot read " << kLogicSystemHeaderPath;
+    ASSERT_FALSE(source.empty()) << "cannot read " << kLogicSystemSourcePath;
+
+    // (1) 声明顺序（决定逆序析构顺序）。
+    ExpectInOrder(header,
+                  { "std::unique_ptr<CountingNoWireCollector> _outbound_collector;",
+                    "std::unique_ptr<MeetingResponseNotificationAdapter> _meeting_adapter;",
+                    "std::unique_ptr<LogicWorkDispatcher> _dispatcher;",
+                    "std::unique_ptr<SerializedWorkExecutor<LogicWorkDispatcher>> _work_executor;" },
+                  "LogicSystem.h declaration order");
+
+    // (2) 四件套在**同一个** call_once 内按依赖顺序构造。
+    const std::string assembly = FunctionWindow(source, "LogicSystem::EnsureWorkQueueStarted");
+    ASSERT_FALSE(assembly.empty());
+    ExpectInOrder(assembly,
+                  { "std::call_once(_work_start_once",
+                    "_outbound_collector.reset(new CountingNoWireCollector()",
+                    "_meeting_adapter.reset(new MeetingResponseNotificationAdapter(",
+                    "_dispatcher.reset(new LogicWorkDispatcher(",
+                    "_work_executor.reset(new SerializedWorkExecutor<LogicWorkDispatcher>(" },
+                  "EnsureWorkQueueStarted assembly order");
+
+    // (3) dispatcher 的第四个实参必须是真实 adapter，而不是 nullptr。
+    const std::string dispatcher_ctor =
+        Between(assembly, "_dispatcher.reset(new LogicWorkDispatcher(", "));");
+    ASSERT_FALSE(dispatcher_ctor.empty());
+    EXPECT_NE(dispatcher_ctor.find("_meeting_adapter.get()"), std::string::npos)
+        << "dispatcher must receive the real adapter pointer";
+    // 第三个实参（观测 sink）在生产中本来就是 nullptr；关键是**第四个**实参
+    // 必须排在那句 nullptr 之后、且是真实 adapter。
+    const std::size_t sink_null = dispatcher_ctor.find("nullptr,");
+    ASSERT_NE(sink_null, std::string::npos) << "production sink argument must stay nullptr";
+    EXPECT_LT(sink_null, dispatcher_ctor.find("_meeting_adapter.get()"))
+        << "the adapter argument must come after the sink argument, and never be null";
+
+    // (4) adapter 拿到的 collector 必须是成员（解引用成员指针），不是局部分析对象。
+    const std::string adapter_ctor =
+        Between(assembly, "_meeting_adapter.reset(new MeetingResponseNotificationAdapter(", "));");
+    ASSERT_FALSE(adapter_ctor.empty());
+    EXPECT_NE(adapter_ctor.find("*_outbound_collector"), std::string::npos);
+}
+
+// ------------------------------------------------------------------------------
+// ASM2：collector / adapter 必须是 LogicSystem 的成员，不能是装配函数的局部对象。
+//       （局部对象会在 call_once 结束时析构 ⇒ adapter 持悬垂引用，R-13）
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM2_CollectorAndAdapterAreMembersNotLocals) {
+    const std::string source = StripComments(ReadSourceFile(kLogicSystemSourcePath));
+    ASSERT_FALSE(source.empty());
+
+    const std::string assembly = FunctionWindow(source, "LogicSystem::EnsureWorkQueueStarted");
+    ASSERT_FALSE(assembly.empty());
+
+    // 局部值对象声明形态一律不得出现。
+    EXPECT_EQ(assembly.find("CountingNoWireCollector collector"), std::string::npos);
+    EXPECT_EQ(assembly.find("MeetingResponseNotificationAdapter adapter"), std::string::npos);
+    // 每一次构造都必须经由 `new`（成员装配），不存在任何栈上值对象。
+    EXPECT_EQ(CountOccurrences(assembly, "CountingNoWireCollector()"),
+              CountOccurrences(assembly, "new CountingNoWireCollector()"));
+
+    // 两个成员各被装配恰好一次（重复装配会破坏 ownership 拓扑）。
+    EXPECT_EQ(CountOccurrences(assembly, "_outbound_collector.reset("),
+              static_cast<std::size_t>(1));
+    EXPECT_EQ(CountOccurrences(assembly, "_meeting_adapter.reset("),
+              static_cast<std::size_t>(1));
+    EXPECT_EQ(CountOccurrences(assembly, "_work_executor.reset("),
+              static_cast<std::size_t>(1));
+}
+
+// ------------------------------------------------------------------------------
+// ASM3：三个生命周期入口的实际契约（noexcept、一次性、drain 后清目录、不吞异常）。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM3_LifecycleEntriesHonourTheirContracts) {
+    const std::string header = StripComments(ReadSourceFile(kLogicSystemHeaderPath));
+    const std::string source = StripComments(ReadSourceFile(kLogicSystemSourcePath));
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+
+    // 声明：目录注册与目录清理是 noexcept；关闭入口不是（失败必须上抛）。
+    EXPECT_NE(header.find("SetMeetingSessionDirectory(\n\t\tstd::shared_ptr<IMeetingSessionDirectory> directory) noexcept;"),
+              std::string::npos);
+    EXPECT_NE(header.find("void ClearMeetingSessionDirectory() noexcept;"), std::string::npos);
+    EXPECT_NE(header.find("void ShutdownWorkExecutor();"), std::string::npos);
+
+    // 目录注册：一次性（已注册即返回）+ 只保存 weak。
+    const std::string set_window =
+        FunctionWindow(source, "LogicSystem::SetMeetingSessionDirectory");
+    ASSERT_FALSE(set_window.empty());
+    EXPECT_NE(set_window.find("_meeting_session_directory_registered)"), std::string::npos);
+    EXPECT_NE(set_window.find("return;"), std::string::npos);
+    EXPECT_NE(set_window.find("_meeting_session_directory = directory;"), std::string::npos);
+    EXPECT_NE(set_window.find("_meeting_session_directory_registered = true;"), std::string::npos);
+    EXPECT_NE(set_window.find("noexcept"), std::string::npos);
+
+    // 关闭 executor：调用真实 StopAndJoin，且**不得**吞异常（无 catch）。
+    const std::string shutdown_window =
+        FunctionWindow(source, "LogicSystem::ShutdownWorkExecutor");
+    ASSERT_FALSE(shutdown_window.empty());
+    EXPECT_NE(shutdown_window.find("_work_executor->StopAndJoin();"), std::string::npos);
+    EXPECT_EQ(shutdown_window.find("catch"), std::string::npos)
+        << "ShutdownWorkExecutor must not swallow failures (coordinator K step)";
+
+    // 目录清理：只 reset 自己的 weak；不触碰 adapter（无法也不需要改它拷贝的那份）。
+    const std::string clear_window =
+        FunctionWindow(source, "LogicSystem::ClearMeetingSessionDirectory");
+    ASSERT_FALSE(clear_window.empty());
+    EXPECT_NE(clear_window.find("_meeting_session_directory.reset();"), std::string::npos);
+    EXPECT_EQ(clear_window.find("_meeting_adapter"), std::string::npos);
+
+    // 析构兜底与显式停止必须同源（避免两份实现漂移）。
+    const std::string dtor_window = FunctionWindow(source, "LogicSystem::~LogicSystem");
+    ASSERT_FALSE(dtor_window.empty());
+    EXPECT_NE(dtor_window.find("ShutdownWorkExecutor();"), std::string::npos);
+}
+
+// ------------------------------------------------------------------------------
+// ASM4：ChatServer 启动阶段顺序（§12.3.6.2 阶段 5/6/7/8/9/10）。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM4_StartupStageOrderAndSignalLifetime) {
+    const std::string main_code = StripComments(ReadSourceFile(kChatServerMainPath));
+    ASSERT_FALSE(main_code.empty()) << "cannot read " << kChatServerMainPath;
+
+    // CSession/CServer 控制块：必须是 make_shared，且不得再出现栈对象。
+    EXPECT_NE(main_code.find("std::make_shared<CServer>(io_context"), std::string::npos);
+    EXPECT_EQ(main_code.find("CServer s(io_context"), std::string::npos);
+
+    // 阶段 7：先登记 LogicSystem，再注册目录；目录注册早于 run()。
+    ExpectInOrder(main_code,
+                  { "shutdown.SetLogicSystem(logic);",
+                    "logic->SetMeetingSessionDirectory(tcp_server);",
+                    "io_context.run();" },
+                  "stage 7 registration before run()");
+
+    // 阶段 4 → 5：HSet 判真，且注册确认早于 BuildAndStart。
+    ExpectInOrder(main_code,
+                  { "if (!redis->HSet(LOGIN_COUNT, server_name, \"0\"))",
+                    "shutdown.MarkRegistrationConfirmed();",
+                    "builder.BuildAndStart();" },
+                  "stage 4 HSet truth check before BuildAndStart");
+
+    // 阶段 5：指针判空 + unique_ptr 移动交接（不得出现裸指针接收或 shared_ptr 包装）。
+    ExpectInOrder(main_code,
+                  { "auto grpc_server = builder.BuildAndStart();",
+                    "if (!grpc_server)",
+                    "shutdown.SetGrpcServer(std::move(grpc_server));" },
+                  "stage 5 grpc ownership handoff");
+    EXPECT_EQ(main_code.find("shared_ptr<grpc::Server>"), std::string::npos);
+    EXPECT_EQ(main_code.find("grpc::Server*"), std::string::npos);
+
+    // 阶段 8 → 9：信号构造之后才启动 gRPC 线程。
+    ExpectInOrder(main_code,
+                  { "std::make_unique<boost::asio::signal_set>",
+                    "signals->async_wait",
+                    "shutdown.StartGrpcThread();" },
+                  "stage 8/9 signal before grpc thread");
+
+    // 阶段 10：正常与 run() 异常路径都必须先 reset signals 再 Cleanup。
+    const std::size_t first_reset = main_code.find("signals.reset();");
+    ASSERT_NE(first_reset, std::string::npos);
+    const std::size_t first_cleanup = main_code.find("shutdown.Cleanup();", first_reset);
+    ASSERT_NE(first_cleanup, std::string::npos);
+    const std::size_t second_reset = main_code.find("signals.reset();", first_reset + 1);
+    ASSERT_NE(second_reset, std::string::npos);
+    const std::size_t second_cleanup = main_code.find("shutdown.Cleanup();", second_reset);
+    ASSERT_NE(second_cleanup, std::string::npos);
+    EXPECT_LT(first_reset, first_cleanup);
+    EXPECT_LT(second_reset, second_cleanup);
+    EXPECT_EQ(CountOccurrences(main_code, "signals.reset();"), static_cast<std::size_t>(2));
+    EXPECT_EQ(CountOccurrences(main_code, "shutdown.Cleanup();"), static_cast<std::size_t>(2));
+
+    // 信号回调只唤醒 io_context：不得在里面做任何清理步骤（A25）。
+    const std::string callback = Between(main_code, "signals->async_wait", "});");
+    ASSERT_FALSE(callback.empty());
+    EXPECT_NE(callback.find("io_context.stop();"), std::string::npos);
+    EXPECT_EQ(callback.find("Stop()"), std::string::npos);
+    EXPECT_EQ(callback.find("Shutdown()"), std::string::npos);
+    EXPECT_EQ(callback.find("Cleanup()"), std::string::npos);
+    EXPECT_EQ(callback.find("HDel"), std::string::npos);
+    EXPECT_EQ(callback.find("Close("), std::string::npos);
+}
+
+// ------------------------------------------------------------------------------
+// ASM5：pool->Stop() 在相关生产文件中**恰好一个**调用点，且位于 Cleanup 内。
+//       同时：不得虚构 CServer::Shutdown()。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM5_SinglePoolStopCallSiteInsideCleanup) {
+    const std::string main_code = StripComments(ReadSourceFile(kChatServerMainPath));
+    const std::string logic_code = StripComments(ReadSourceFile(kLogicSystemSourcePath));
+    const std::string pool_code = StripComments(ReadSourceFile(kPoolSourcePath));
+    const std::string server_header = StripComments(ReadSourceFile(kServerHeaderPath));
+    ASSERT_FALSE(main_code.empty());
+    ASSERT_FALSE(logic_code.empty());
+    ASSERT_FALSE(pool_code.empty());
+    ASSERT_FALSE(server_header.empty());
+
+    // pool->Stop()：跨三个可能调用它的生产文件，恰好一次。
+    const std::size_t total = CountOccurrences(main_code, "pool_->Stop();") +
+                              CountOccurrences(main_code, "pool->Stop()") +
+                              CountOccurrences(logic_code, "pool->Stop()") +
+                              CountOccurrences(pool_code, "->Stop()");
+    EXPECT_EQ(total, static_cast<std::size_t>(1))
+        << "pool->Stop() must have exactly one call site in production code";
+
+    // 唯一调用点在 Cleanup 体内，且被 K 级包装。
+    const std::string cleanup = FunctionWindow(main_code, "void Cleanup() noexcept");
+    ASSERT_FALSE(cleanup.empty());
+    EXPECT_NE(cleanup.find("pool_->Stop();"), std::string::npos);
+    EXPECT_NE(cleanup.find("Fatal(\"1b pool->Stop\""), std::string::npos);
+
+    // 不得虚构 CServer::Shutdown()，也不得对 TCP Server 调 Shutdown。
+    EXPECT_EQ(server_header.find("Shutdown"), std::string::npos);
+    EXPECT_EQ(main_code.find("tcp_server_->Shutdown"), std::string::npos);
+    EXPECT_EQ(main_code.find("CServer::Shutdown"), std::string::npos);
+}
+
+// ------------------------------------------------------------------------------
+// ASM6：Cleanup 的 K/B 分级、1a→5 的严格顺序、done_ 闸门与 fail-stop。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM6_CleanupOrderAndFailurePolicy) {
+    const std::string main_code = StripComments(ReadSourceFile(kChatServerMainPath));
+    ASSERT_FALSE(main_code.empty());
+
+    const std::string cleanup = FunctionWindow(main_code, "void Cleanup() noexcept");
+    ASSERT_FALSE(cleanup.empty());
+
+    // (1) done_ 一次闸门必须在第一步之前。
+    const std::size_t gate = cleanup.find("if (done_)");
+    ASSERT_NE(gate, std::string::npos);
+    EXPECT_NE(cleanup.find("done_ = true;"), std::string::npos);
+    EXPECT_LT(gate, cleanup.find("Fatal(\"1a"));
+
+    // (2) 1a → 1b → 2 → 3 → 4a → 4b → 5 严格递增。
+    ExpectInOrder(cleanup,
+                  { "\"1a grpc_server->Shutdown\"",
+                    "\"1b pool->Stop\"",
+                    "\"2 ShutdownWorkExecutor\"",
+                    "\"3 ClearMeetingSessionDirectory\"",
+                    "\"4a redis HDel\"",
+                    "\"4b redis Close\"",
+                    "\"5 grpc_thread join\"" },
+                  "Cleanup step order");
+
+    // (3) K/B 分级：1a/1b/2/4b/5 是 Fatal；3/4a 是 BestEffort。
+    struct StepLevel {
+        const char* label;
+        const char* wrapper;
+    };
+    const StepLevel levels[] = {
+        { "\"1a grpc_server->Shutdown\"", "Fatal(" },
+        { "\"1b pool->Stop\"", "Fatal(" },
+        { "\"2 ShutdownWorkExecutor\"", "Fatal(" },
+        { "\"3 ClearMeetingSessionDirectory\"", "BestEffort(" },
+        { "\"4a redis HDel\"", "BestEffort(" },
+        { "\"4b redis Close\"", "Fatal(" },
+        { "\"5 grpc_thread join\"", "Fatal(" },
+    };
+    for (std::size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); ++i) {
+        const std::size_t label = cleanup.find(levels[i].label);
+        ASSERT_NE(label, std::string::npos) << levels[i].label;
+        const std::size_t begin = (label > 12) ? label - 12 : 0;
+        const std::string prefix = cleanup.substr(begin, label - begin);
+        EXPECT_NE(prefix.find(levels[i].wrapper), std::string::npos)
+            << "wrong failure policy for " << levels[i].label;
+    }
+
+    // (4) fail-stop 必须真正终止进程，且不得谎称优雅关闭。
+    EXPECT_NE(cleanup.find("std::abort();"), std::string::npos);
+    EXPECT_NE(cleanup.find("this is NOT a"), std::string::npos);
+    // Fatal / BestEffort 都必须各自 try/catch（两层 catch 都要有）。
+    const std::string fatal = Between(cleanup, "void Fatal(", "template <typename Fn>\n    void BestEffort");
+    ASSERT_FALSE(fatal.empty());
+    EXPECT_NE(fatal.find("catch (const std::exception& e)"), std::string::npos);
+    EXPECT_NE(fatal.find("catch (...)"), std::string::npos);
+}
+
+// ------------------------------------------------------------------------------
+// ASM7：HSet 判真与 registration_confirmed_ 的门控语义（§12.3.17.2 / §12.3.18.2）。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM7_RegistrationGateControlsHDel) {
+    const std::string main_code = StripComments(ReadSourceFile(kChatServerMainPath));
+    ASSERT_FALSE(main_code.empty());
+
+    // 初始值必须为 false（未确认）。
+    EXPECT_NE(main_code.find("registration_confirmed_(false)"), std::string::npos);
+    // 只有 MarkRegistrationConfirmed() 能置位。
+    const std::string mark = Between(main_code, "void MarkRegistrationConfirmed() noexcept", "}");
+    ASSERT_FALSE(mark.empty());
+    EXPECT_NE(mark.find("registration_confirmed_ = true;"), std::string::npos);
+    EXPECT_EQ(CountOccurrences(main_code, "registration_confirmed_ = true;"),
+              static_cast<std::size_t>(1));
+
+    // 4a 受门控：未确认 ⇒ 跳过并如实说明（不断言"字段一定不存在"）。
+    const std::string hdel_block = Between(main_code, "\"4a redis HDel\"", "\"4b redis Close\"");
+    ASSERT_FALSE(hdel_block.empty());
+    EXPECT_NE(hdel_block.find("!registration_confirmed_"), std::string::npos);
+    EXPECT_NE(hdel_block.find("was never confirmed"), std::string::npos);
+    EXPECT_NE(hdel_block.find("cause unknown"), std::string::npos);
+    // 跳过分支只 return 出 lambda，4b 仍然是 Cleanup 的下一个步骤（由 ASM6 保证）。
+    EXPECT_LT(hdel_block.find("if (!redis_ || !registration_confirmed_)"),
+              hdel_block.find("redis_->HDel"));
+}
+
+// ------------------------------------------------------------------------------
+// ASM8：仍然只有一条 FIFO、一个消费者；没有新增线程/队列/发送入口。
+// ------------------------------------------------------------------------------
+TEST(AssemblyContract, ASM8_StillOneFifoOneConsumer) {
+    const std::string dispatcher_header = StripComments(ReadSourceFile(kDispatcherHeaderPath));
+    const std::string main_code = StripComments(ReadSourceFile(kChatServerMainPath));
+    const std::string logic_code = StripComments(ReadSourceFile(kLogicSystemSourcePath));
+    ASSERT_FALSE(dispatcher_header.empty());
+    ASSERT_FALSE(main_code.empty());
+    ASSERT_FALSE(logic_code.empty());
+
+    // 唯一 FIFO 实例与唯一 worker 线程。
+    EXPECT_EQ(CountOccurrences(dispatcher_header, "LogicWorkQueue queue_;"),
+              static_cast<std::size_t>(1));
+    EXPECT_EQ(CountOccurrences(dispatcher_header, "std::thread worker_;"),
+              static_cast<std::size_t>(1));
+
+    // 协调器只按值持有**一个** std::thread（gRPC Wait），不新建线程池。
+    EXPECT_EQ(CountOccurrences(main_code, "std::thread grpc_thread_;"),
+              static_cast<std::size_t>(1));
+    EXPECT_EQ(main_code.find("emplace_back("), std::string::npos);
+    EXPECT_EQ(main_code.find("new std::thread"), std::string::npos);
+
+    // LogicSystem 侧不得新增第二条队列 / 第二个执行器。
+    EXPECT_EQ(CountOccurrences(logic_code, "new SerializedWorkExecutor<LogicWorkDispatcher>("),
+              static_cast<std::size_t>(1));
+    EXPECT_EQ(logic_code.find("LogicWorkQueue "), std::string::npos);
+
+    // M6 仍不发送任何字节：**M6.6 新增的装配代码**里不得出现发送调用。
+    // （函数窗口把范围限制在装配/生命周期入口，避免误伤 LogicSystem.cpp 中既有的
+    //   legacy IM 业务发送路径 —— 那些不在本步范围内，也不是 Meeting 出站路径。）
+    const std::string assembly = FunctionWindow(logic_code, "LogicSystem::EnsureWorkQueueStarted");
+    ASSERT_FALSE(assembly.empty());
+    EXPECT_EQ(assembly.find("Send("), std::string::npos);
+    EXPECT_EQ(assembly.find("socket"), std::string::npos);
+    EXPECT_EQ(assembly.find("asio"), std::string::npos);
+    EXPECT_EQ(main_code.find("->Send("), std::string::npos);
+}
