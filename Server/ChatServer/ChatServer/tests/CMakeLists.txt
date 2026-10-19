@@ -72,6 +72,40 @@ include(GoogleTest)
 gtest_discover_tests(ChatServerUnitTests)
 
 # ------------------------------------------------------------------------------
+# M6.2: MeetingRequestContextBuilder (CB1-CB6).
+#
+# Layer C direct-invocation tests. Separate target on purpose:
+#   * it links GTest + MeetingDomain only (no application runtime graph);
+#   * it stays process-local: no network / Redis / MySQL / gRPC / protobuf;
+#   * ChatServerUnitTests keeps its existing sources and semantics untouched.
+#
+# MEETING_CONTEXT_BUILDER_HEADER feeds the CB6 static check with the absolute
+# source path, so the test can assert the builder header never references
+# session internals.
+# ------------------------------------------------------------------------------
+add_executable(MeetingResponseNotificationAdapterTest
+    MeetingResponseNotificationAdapterTest.cpp
+)
+
+target_compile_features(MeetingResponseNotificationAdapterTest PRIVATE cxx_std_14)
+
+target_include_directories(MeetingResponseNotificationAdapterTest PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+
+target_compile_definitions(MeetingResponseNotificationAdapterTest PRIVATE
+    MEETING_CONTEXT_BUILDER_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/../MeetingRequestContextBuilder.h"
+)
+
+target_link_libraries(MeetingResponseNotificationAdapterTest PRIVATE
+    GTest::gtest_main
+    # Pure domain library: brings its own include root (PUBLIC) and links nothing.
+    MeetingDomain
+)
+
+gtest_discover_tests(MeetingResponseNotificationAdapterTest)
+
+# ------------------------------------------------------------------------------
 # M6.6a / R-20: RedisConPool contract tests.
 #
 # Deliberately a SEPARATE executable:
