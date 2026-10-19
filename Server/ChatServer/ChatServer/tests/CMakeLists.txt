@@ -94,6 +94,14 @@ gtest_discover_tests(ChatServerUnitTests)
 # ------------------------------------------------------------------------------
 add_executable(MeetingResponseNotificationAdapterTest
     MeetingResponseNotificationAdapterTest.cpp
+    # M6.4: the **real** adapter and the **real** production collector are part
+    # of this target (not re-implemented in the test). Same style as
+    # ../LogicWorkDispatcher.cpp in ChatServerUnitTests. Both TUs depend only on
+    # the standard library + the pure domain headers, so the target still links
+    # GTest + MeetingDomain only -- no asio, Boost, Redis, MySQL, gRPC,
+    # protobuf or jsoncpp (M6 §16.5).
+    ../MeetingResponseNotificationAdapter.cpp
+    ../CountingNoWireCollector.cpp
 )
 
 target_compile_features(MeetingResponseNotificationAdapterTest PRIVATE cxx_std_14)

@@ -49,10 +49,16 @@ set(CHATSERVER_APPLICATION_SOURCES
     ChatServer.cpp
     ChatServiceImpl.cpp
     ConfigMgr.cpp
+    # M6.4: the counting no-wire outbound collector and the response /
+    # notification adapter. They are compiled into the executable here; the
+    # LogicSystem assembly that constructs them belongs to M6.6 and is
+    # deliberately NOT part of this step (neither is any call site).
+    CountingNoWireCollector.cpp
     CServer.cpp
     CSession.cpp
     LogicSystem.cpp
     LogicWorkDispatcher.cpp
+    MeetingResponseNotificationAdapter.cpp
     MsgNode.cpp
     MysqlDao.cpp
     MysqlMgr.cpp
