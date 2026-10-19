@@ -37,6 +37,15 @@
 
 class LogicNode;
 
+// M6.5：出站 adapter 的抽象接口（定义在 MeetingResponseNotificationAdapter.h）。
+//
+// 这里刻意只做**前向声明**，不 include 那个头文件：
+//   - LogicWorkDispatcher 只需要"一个非拥有指针 + 调用七个虚方法"，不需要完整定义
+//     （完整定义由 .cpp 引入，因此本头文件的使用者不必编译 adapter 实现）；
+//   - 依赖方向冻结为 "dispatcher → 接口 ← 实现"（§5.3）：本文件不认识
+//     MeetingResponseNotificationAdapter 这个具体类型，只认识接口。
+class IMeetingResponseNotificationAdapter;
+
 // ------------------------------------------------------------------------------
 // 唯一权威 FIFO。
 //
@@ -605,9 +614,20 @@ meeting::MeetingServiceDependencies MakeSystemMeetingWorkDependencies();
 
 class LogicWorkDispatcher : public IWorkHandler {
 public:
+    // M6.5 / §5.2 / §5.3：adapter 通过**非拥有指针**注入，允许为 nullptr。
+    //
+    // 为什么放在第四个参数并给默认值 nullptr：
+    //   - 既有构造调用（LogicSystem.cpp 装配点、M4/M5 的测试 fixture）都只传三个
+    //     参数，默认值使它们的语义与二进制行为完全不变；
+    //   - 「不提供 adapter」是 M6.5 之前的合法形态，而不是错误配置：此时 dispatcher
+    //     的行为与 M4 完全一致（七个调用点整体不存在）。
+    //
+    // 所有权：dispatcher **不**拥有、**不**创建、**不**用 shared_ptr 管理 adapter。
+    // 正式装配（由 LogicSystem 构造并保证其生命周期覆盖 dispatcher）属于 M6.6。
     LogicWorkDispatcher(const meeting::ServerId& local_server_id,
                         meeting::MeetingServiceDependencies dependencies,
-                        IWorkObservationSink* sink);
+                        IWorkObservationSink* sink,
+                        IMeetingResponseNotificationAdapter* adapter = nullptr);
 
     // IWorkHandler
     void DispatchWork(const LogicWorkItem& item);
@@ -625,6 +645,13 @@ public:
         return meeting_service_.HasClosedSnapshot(meeting_id);
     }
 
+    // M6.5 / §13.4：被吞掉的 adapter 违约异常次数（只读诊断）。
+    //
+    // 生产 adapter 的七项 On* 都是 noexcept 实现，因此正常情况下恒为 0；
+    // 非 0 只表示"某个 adapter 实现违反了接口的不抛契约"，计数只用于诊断与测试断言，
+    // 绝不参与任何业务判定，也不回写领域状态。
+    std::size_t AdapterExceptionCount() const { return adapter_exception_count_.load(); }
+
     // CREATE 命令不携带 meeting_id（ID 由注入来源产生），因此把最近一次成功创建
     // 的 ID 作为只读值暴露出来，供观测点与控制流关联使用。
     // 这是值拷贝，不是 registry 访问，也不构成任何可变入口。
@@ -639,6 +666,11 @@ private:
     void DispatchQuery(const LogicWorkItem& item);
     void DispatchListParticipants(const LogicWorkItem& item);
 
+    // M6.5 / §6.5：七项 adapter 调用点共用的**调用边界**守卫由 .cpp 内的文件级
+    // 模板实现（`InvokeAdapterGuarded`）：它只把一次 adapter 调用包在 try/catch 里，
+    // 违约只计一次数；不改变领域结果、不影响 sink 观测顺序、也不影响 Close 派生的入队。
+    // 刻意不在头文件暴露任何模板/异常细节 —— dispatcher 的公开契约不变。
+
     // M3 结果 → 观测用最小摘要。
     static MeetingCommandOutcome MakeCommandOutcome(ClientMeetingCommandKind command,
                                                     const meeting::MeetingId& meeting_id,
@@ -651,5 +683,10 @@ private:
 
     meeting::MeetingService meeting_service_;
     IWorkObservationSink* sink_;
+    // M6.5：非拥有、可空。声明在 sink_ 之后、last_created_meeting_id_ 之前，
+    // 与构造初始化列表的顺序一致（避免 -Wreorder，也避免"初始化顺序依赖未初始化成员"）。
+    IMeetingResponseNotificationAdapter* adapter_;
+    // adapter 违约异常计数（观测专用；生产 adapter 为 noexcept 实现 ⇒ 恒为 0）。
+    std::atomic<std::size_t> adapter_exception_count_;
     meeting::MeetingId last_created_meeting_id_;
 };

@@ -102,6 +102,13 @@ add_executable(MeetingResponseNotificationAdapterTest
     # protobuf or jsoncpp (M6 §16.5).
     ../MeetingResponseNotificationAdapter.cpp
     ../CountingNoWireCollector.cpp
+    # M6.5: the **real** dispatcher is compiled into this target too, so the
+    # adapter call sites (six responses + FINALIZE_CLOSE) are exercised through
+    # the production dispatch code instead of a test-local copy. Same TU and
+    # same style as ChatServerUnitTests above. It depends only on
+    # MeetingDomain + the standard library + Boost.UUID headers, so the target
+    # still links GTest + MeetingDomain only.
+    ../LogicWorkDispatcher.cpp
 )
 
 target_compile_features(MeetingResponseNotificationAdapterTest PRIVATE cxx_std_14)

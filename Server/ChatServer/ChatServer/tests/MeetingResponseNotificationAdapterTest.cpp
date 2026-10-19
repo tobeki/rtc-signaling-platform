@@ -30,8 +30,17 @@
 //     · 领域状态、幂等、CLOSED 快照、历史成员授权全部由真实领域 API 产生，
 //       测试不构造假的 MeetingServiceResult。
 //   仍然 NOT VERIFIED（留给 M6.7 runtime smoke）：真实 CServer 的 _sessions
-//   注册表、真实 CSession::Send（M6 不发送）、dispatcher 的调用位置与顺序
-//   （M6.5）、LogicSystem 装配与关闭顺序（M6.6）。
+//   注册表、真实 CSession::Send（M6 不发送）。
+//
+// M6.5 追加（§16.2 组 6/7）：把真实 LogicWorkDispatcher + 真实
+// SerializedWorkExecutor 编入本 target，让**生产分发代码**自己把领域结果交给
+// adapter。新增用例因此覆盖：六个 Response 调用点、FINALIZE_CLOSE 调用点、
+// Close 的两 turn 时序、唯一 FIFO 顺序、以及 adapter 违约时的异常隔离。
+//   · SS1–SS5：SESSION_STATE_REJECTED / AUTH_REQUIRED 区分与 lookup 失败不改写结果
+//   · OR1–OR3：response 顺序 == 入队顺序、FINALIZE_CLOSE 不插队、两 turn 收敛
+//   · OR4：SerializedWorkExecutor::StopAndJoin 幂等（OR5 的真实关闭顺序属 M6.6/M6.7）
+//   · EX1：adapter 违约抛异常不会杀死唯一消费者，也不阻止 Close 收敛
+// 仍未装配 LogicSystem / ChatServer（M6.6），因此本 target 不宣称任何端到端送达。
 // ==============================================================================
 
 #include <gtest/gtest.h>
@@ -64,6 +73,8 @@
 // 它们只依赖 C++ 标准库 + 纯领域头文件，因此不破坏本 target 的依赖隔离。
 #include "CountingNoWireCollector.h"
 #include "MeetingResponseNotificationAdapter.h"
+// M6.5：真实分发器 + 真实串行化执行器（同一份生产代码，不是测试副本）。
+#include "LogicWorkDispatcher.h"
 
 namespace {
 
@@ -695,6 +706,12 @@ const char* const kCollectorHeaderPath =
     CHATSERVER_SOURCE_DIR "/CountingNoWireCollector.h";
 const char* const kCollectorSourcePath =
     CHATSERVER_SOURCE_DIR "/CountingNoWireCollector.cpp";
+// M6.5：SS1 需要核对"CLOSING/CLOSED 同分支"这一领域不变量（只读该文件）。
+const char* const kMeetingServiceSourcePath =
+    CHATSERVER_SOURCE_DIR "/meeting/MeetingService.cpp";
+// M6.5：调用点顺序的静态核对目标（只读该文件）。
+const char* const kDispatcherSourcePath =
+    CHATSERVER_SOURCE_DIR "/LogicWorkDispatcher.cpp";
 
 // ------------------------------------------------------------------------------
 // 去掉注释后的源码（**代码级**静态核对用）。
@@ -2163,4 +2180,879 @@ TEST(MeetingResponseMapping, RESP4_SessionStateRejectedIsNotRewrittenAsAuthRequi
     EXPECT_EQ(response.result_name, std::string("SESSION_STATE_REJECTED"));
     EXPECT_NE(response.result_code, meeting::ResultCode::AUTH_REQUIRED);
     EXPECT_FALSE(response.has_view);
+}
+
+// ==============================================================================
+// M6.5 / §16.2 组 6/7：dispatcher → adapter 的真实集成。
+//
+// 本节的每一个断言都建立在**真实生产链路**上：
+//
+//   测试线程                                         消费者线程（生产 WorkerLoop）
+//   ────────                                         ────────────────────────────
+//   executor.EnqueueBatchBaseline(items)  ──┐
+//   executor.WaitUntilIdle(5000, base)      │        queue.Pop → DispatchOutsideLock
+//                                           └──────► LogicWorkDispatcher::DispatchWork
+//                                                      ├── MeetingService::<API>（真实领域）
+//                                                      ├── sink_->Record*（原观测顺序）
+//                                                      └── adapter_->On<API>（M6.5 新增）
+//
+// 测试**不复制**任何分发逻辑：它只入队 work item，然后等待真实执行器静止
+// （§16.4 R1 认可的唯一等待边界），再对 collector / sink 的**加锁快照**做断言。
+// 不使用 sleep、不断言队列瞬时 Size()/IsEmpty()。
+// ==============================================================================
+
+namespace {
+
+const char* const kDispatchHostSession = "d-host";
+const int kDispatchHostUser = 11;
+const char* const kDispatchStrangerSession = "d-stranger";
+const int kDispatchStrangerUser = 77;
+
+// m6.5 用例依赖注入的确定性 ID 序列：全新 fixture 的第一个 meeting id 恒为它。
+// 同一批次里需要"先 CREATE 再引用该 id"时只能靠这个可断言的前置事实，
+// 因此每个用例都会先断言 CREATE 的响应确实用了这个 id。
+const char* const kFirstMeetingId = "meeting-1";
+
+// ------------------------------------------------------------------------------
+// 记录型观测 sink（§16.4 R4：工作线程写、测试线程读 ⇒ 内部加锁）。
+//
+// 它只记录，不修改任何状态；同时扮演 executor 的"内部入队瞬间快照"观察者。
+// ------------------------------------------------------------------------------
+class RecordingObservationSink : public IWorkObservationSink {
+public:
+    void RecordWorkDispatched(const LogicWorkItem& item,
+                              unsigned long long /*sequence*/,
+                              const std::vector<WorkDomainEvent>& events) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        dispatched_kinds_.push_back(item.kind);
+        dispatched_events_.push_back(events);
+    }
+
+    void RecordLegacyMessageRouted(const meeting::SessionId& /*session_id*/,
+                                   short /*msg_id*/,
+                                   std::size_t /*payload_size*/) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        legacy_routed_ += 1;
+    }
+
+    void RecordSessionDisconnected(const meeting::SessionId& /*session_id*/,
+                                   std::size_t affected_meeting_count) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_fanout_.push_back(affected_meeting_count);
+    }
+
+    void RecordFinalizeClose(const meeting::MeetingId& meeting_id,
+                             bool finalized,
+                             bool already_finalized,
+                             const std::vector<meeting::SessionId>& notification_session_ids) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        finalize_meeting_ids_.push_back(meeting_id);
+        finalize_flags_.push_back(std::make_pair(finalized, already_finalized));
+        finalize_targets_.push_back(notification_session_ids);
+    }
+
+    void RecordMeetingCommand(const MeetingCommandOutcome& outcome) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        outcomes_.push_back(outcome);
+    }
+
+    void RecordInternalWorkEnqueued(const LogicWorkItem& item,
+                                    const std::vector<LogicWorkItem>& queue_after) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        internal_enqueue_kinds_.push_back(item.kind);
+        internal_enqueue_queue_kinds_.push_back(KindsOf(queue_after));
+    }
+
+    std::vector<MeetingCommandOutcome> Outcomes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return outcomes_;
+    }
+
+    std::vector<std::vector<WorkDomainEvent> > DispatchedEvents() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dispatched_events_;
+    }
+
+    std::vector<LogicWorkKind> DispatchedKinds() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dispatched_kinds_;
+    }
+
+    std::vector<LogicWorkKind> InternalEnqueueKinds() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return internal_enqueue_kinds_;
+    }
+
+    std::vector<std::vector<LogicWorkKind> > InternalEnqueueQueueKinds() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return internal_enqueue_queue_kinds_;
+    }
+
+    std::vector<std::pair<bool, bool> > FinalizeFlags() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return finalize_flags_;
+    }
+
+    std::vector<std::vector<meeting::SessionId> > FinalizeTargets() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return finalize_targets_;
+    }
+
+private:
+    static std::vector<LogicWorkKind> KindsOf(const std::vector<LogicWorkItem>& items) {
+        std::vector<LogicWorkKind> kinds;
+        kinds.reserve(items.size());
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            kinds.push_back(items[i].kind);
+        }
+        return kinds;
+    }
+
+    mutable std::mutex mutex_;
+    std::vector<LogicWorkKind> dispatched_kinds_;
+    std::vector<std::vector<WorkDomainEvent> > dispatched_events_;
+    std::size_t legacy_routed_ = 0;
+    std::vector<std::size_t> disconnect_fanout_;
+    std::vector<meeting::MeetingId> finalize_meeting_ids_;
+    std::vector<std::pair<bool, bool> > finalize_flags_;
+    std::vector<std::vector<meeting::SessionId> > finalize_targets_;
+    std::vector<MeetingCommandOutcome> outcomes_;
+    std::vector<LogicWorkKind> internal_enqueue_kinds_;
+    std::vector<std::vector<LogicWorkKind> > internal_enqueue_queue_kinds_;
+};
+
+// ------------------------------------------------------------------------------
+// 违约型 adapter：七项 On* **都抛异常**。
+//
+// M6.4 的生产实现是 noexcept，但**接口本身不是**，所以 dispatcher 必须自己兜住
+// 抽象接口的违约实现（§13.4）。这个替身就是用来证明那一层的：
+//   没有 dispatcher 的守卫时，异常会穿出 std::thread 入口 ⇒ std::terminate。
+// ------------------------------------------------------------------------------
+class ThrowingAdapter : public IMeetingResponseNotificationAdapter {
+public:
+    void OnCreateMeeting(const meeting::MeetingRequestContext&,
+                         const meeting::CreateMeetingResult&) override {
+        Throw();
+    }
+    void OnJoinMeeting(const meeting::MeetingRequestContext&,
+                       const meeting::JoinMeetingResult&) override {
+        Throw();
+    }
+    void OnLeaveMeeting(const meeting::MeetingRequestContext&,
+                        const meeting::LeaveMeetingResult&) override {
+        Throw();
+    }
+    void OnCloseMeeting(const meeting::MeetingRequestContext&,
+                        const meeting::CloseMeetingResult&) override {
+        Throw();
+    }
+    void OnQueryMeeting(const meeting::MeetingRequestContext&,
+                        const meeting::QueryMeetingResult&) override {
+        Throw();
+    }
+    void OnListParticipants(const meeting::MeetingRequestContext&,
+                            const meeting::ListParticipantsResult&) override {
+        Throw();
+    }
+    void OnFinalizeClose(const meeting::FinalizeCloseResult&) override {
+        Throw();
+    }
+
+    std::uint64_t Calls() const { return calls_.load(); }
+
+private:
+    void Throw() {
+        calls_.fetch_add(1);
+        throw std::runtime_error("injected adapter contract violation");
+    }
+
+    std::atomic<std::uint64_t> calls_{0};
+};
+
+// ------------------------------------------------------------------------------
+// 真实分发流水线：真实 executor → 真实 dispatcher → 真实 adapter → 真实领域。
+//
+// 成员声明顺序 = 构造顺序；逆序析构保证"worker 先停，再拆依赖"：
+//   executor_（dtor 内 StopAndJoin）→ dispatcher_ → sink_/adapters → directory_ → collector_
+// 也就是说 worker 引用的每一个对象都比它活得久（§8 的生命周期要求）。
+// ------------------------------------------------------------------------------
+class DispatchPipeline {
+public:
+    enum AdapterMode {
+        kRealAdapter = 0,   // 真实 MeetingResponseNotificationAdapter
+        kThrowingAdapter = 1
+    };
+
+    explicit DispatchPipeline(AdapterMode mode = kRealAdapter)
+        : collector_(),
+          directory_(std::make_shared<FakeSessionDirectory>()),
+          sink_(),
+          // 只构造被选中的那个 adapter；两者都声明在 dispatcher_ **之前**，
+          // 因此 dispatcher_ 的初始化表达式可以安全取用其地址。
+          real_adapter_(mode == kRealAdapter
+                            ? new MeetingResponseNotificationAdapter(collector_, directory_)
+                            : nullptr),
+          throwing_adapter_(mode == kThrowingAdapter ? new ThrowingAdapter() : nullptr),
+          dispatcher_(std::string(kLocalServer), MakeDeterministicDependencies(), &sink_,
+                      real_adapter_
+                          ? static_cast<IMeetingResponseNotificationAdapter*>(
+                                real_adapter_.get())
+                          : static_cast<IMeetingResponseNotificationAdapter*>(
+                                throwing_adapter_.get())),
+          executor_(dispatcher_, nullptr) {
+        executor_.SetInternalEnqueueObserver(&sink_);
+    }
+
+    ~DispatchPipeline() { executor_.StopAndJoin(); }
+
+    DispatchPipeline(const DispatchPipeline&) = delete;
+    DispatchPipeline& operator=(const DispatchPipeline&) = delete;
+
+    LogicWorkDispatcher& Dispatcher() { return dispatcher_; }
+    SerializedWorkExecutor<LogicWorkDispatcher>& Executor() { return executor_; }
+    RecordingObservationSink& Sink() { return sink_; }
+    RecordingMessageCollector& Collector() { return collector_; }
+    std::shared_ptr<FakeSessionDirectory> Directory() const { return directory_; }
+
+    MeetingResponseNotificationAdapter& RealAdapter() { return *real_adapter_; }
+    ThrowingAdapter& ThrowingTestAdapter() { return *throwing_adapter_; }
+
+    // 判活目录项（传输侧存活）。领域会话记录由 INTERNAL_SESSION_* work 建立。
+    void AddDirectoryEntry(const std::string& session_id) {
+        directory_->Register(std::make_shared<FakeLiveSession>(session_id, destroy_count_));
+    }
+
+    // 等价于真实 ClearSession ⇒ erase：领域记录仍在，但传输侧已消失。
+    void RemoveDirectoryEntry(const std::string& session_id) {
+        directory_->Erase(session_id);
+    }
+
+    // 释放测试对目录的强引用 ⇒ adapter 的 weak 失效（§8.4 的既有契约）。
+    void ReleaseDirectoryStrongRefs() { directory_.reset(); }
+
+    static std::vector<LogicWorkItem> BootstrapWork(const std::string& session_id,
+                                                   int user_id) {
+        std::vector<LogicWorkItem> items;
+        items.push_back(MakeSessionRegisterWork(session_id));
+        items.push_back(MakeSessionAuthenticateWork(session_id, user_id));
+        return items;
+    }
+
+    LogicWorkItem Command(const std::string& request_id,
+                          const std::string& session_id,
+                          int user_id,
+                          ClientMeetingCommandKind command,
+                          const std::string& meeting_id) const {
+        const meeting::MeetingRequestContext context =
+            builder_.Build(session_id, user_id, request_id, std::string(kLocalServer));
+        return MakeMeetingCommandWork(context, command, meeting_id);
+    }
+
+    // 入队一批 work 并等待**这一批**被完全消费（唯一的等待边界，§16.4 R1）。
+    bool EnqueueAndWait(const std::vector<LogicWorkItem>& items) {
+        const LogicWorkIdleProgress baseline = executor_.EnqueueBatchBaseline(items);
+        return executor_.WaitUntilIdle(5000, baseline);
+    }
+
+    bool EnqueueAndWait(const LogicWorkItem& item) {
+        return EnqueueAndWait(std::vector<LogicWorkItem>(1, item));
+    }
+
+    std::vector<MeetingOutboundMessage> Responses() const {
+        return collector_.OfKind(MeetingOutboundKind::RESPONSE);
+    }
+
+    std::vector<MeetingOutboundMessage> Notifications() const {
+        return collector_.OfKind(MeetingOutboundKind::NOTIFICATION);
+    }
+
+    // 常用前置：建立 host 会话 + 创建会议（全部走真实 FIFO）。
+    bool BootstrapHostAndCreate() {
+        AddDirectoryEntry(kDispatchHostSession);
+        if (!EnqueueAndWait(BootstrapWork(kDispatchHostSession, kDispatchHostUser))) {
+            return false;
+        }
+        return EnqueueAndWait(Command("req-create", kDispatchHostSession,
+                                      kDispatchHostUser, ClientMeetingCommandKind::CREATE,
+                                      std::string()));
+    }
+
+private:
+    // 声明顺序即构造顺序（见类注释）。
+    RecordingMessageCollector collector_;
+    std::shared_ptr<FakeSessionDirectory> directory_;
+    RecordingObservationSink sink_;
+    std::unique_ptr<MeetingResponseNotificationAdapter> real_adapter_;
+    std::unique_ptr<ThrowingAdapter> throwing_adapter_;
+    LogicWorkDispatcher dispatcher_;
+    SerializedWorkExecutor<LogicWorkDispatcher> executor_;
+    std::shared_ptr<int> destroy_count_ = std::make_shared<int>(0);
+    MeetingRequestContextBuilder builder_;
+};
+
+std::vector<std::string> ResponseRequestIds(const std::vector<MeetingOutboundMessage>& responses) {
+    std::vector<std::string> ids;
+    ids.reserve(responses.size());
+    for (std::size_t i = 0; i < responses.size(); ++i) {
+        ids.push_back(responses[i].response.request_id);
+    }
+    return ids;
+}
+
+std::vector<ClientMeetingCommandKind> ResponseCommands(
+    const std::vector<MeetingOutboundMessage>& responses) {
+    std::vector<ClientMeetingCommandKind> commands;
+    commands.reserve(responses.size());
+    for (std::size_t i = 0; i < responses.size(); ++i) {
+        commands.push_back(responses[i].response.command);
+    }
+    return commands;
+}
+
+}  // namespace
+
+// ==============================================================================
+// 组 6：CLOSING / CLOSED → SESSION_STATE_REJECTED（SS1–SS5）
+//
+// 全部经真实 FIFO / dispatcher 路径，断言落在**真实产出的 response 消息**或
+// 真实 sink 记录的领域结果上，而不是直接调用 adapter。
+// ==============================================================================
+
+// ------------------------------------------------------------------------------
+// SS1：CLOSING 与 CLOSED 落在**同一个**领域分支上，都返回 SESSION_STATE_REJECTED。
+//
+// 为什么这一条必须是静态核对：CLOSING 是**单次 mutation 内部的瞬态** ——
+// MeetingService::SessionDisconnected 在同一个调用里先把记录置为 CLOSING（步骤 1），
+// 完成 fan-out 清理后才置为 CLOSED（步骤 5）。因此任何**排队**的命令都观察不到
+// CLOSING，只能观察到 CLOSED tombstone（SS2 已实测）。
+// "CLOSING 状态的可运行构造"因此登记为 NOT VERIFIED（见报告），但可以核对：
+// 该分支同时覆盖 CLOSING 与 CLOSED，且映射目标是 SESSION_STATE_REJECTED 而不是
+// AUTH_REQUIRED —— 这正是 §16.2 SS1 要锁定的不变量。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, SS1_SessionStateRejectedBranchCoversClosingAndClosed) {
+    const std::string service_source = ReadSourceFile(kMeetingServiceSourcePath);
+    ASSERT_FALSE(service_source.empty()) << "cannot read " << kMeetingServiceSourcePath;
+
+    // (1) CLOSING / CLOSED 同分支，且该分支返回 SESSION_STATE_REJECTED。
+    const std::size_t branch = service_source.find(
+        "record.state == DomainSessionState::CLOSING");
+    ASSERT_NE(branch, std::string::npos);
+    const std::string window = service_source.substr(branch, 240);
+    EXPECT_NE(window.find("DomainSessionState::CLOSED"), std::string::npos);
+    EXPECT_NE(window.find("ResultCode::SESSION_STATE_REJECTED"), std::string::npos);
+    EXPECT_EQ(window.find("ResultCode::AUTH_REQUIRED"), std::string::npos);
+
+    // (2) CLOSING → CLOSED 的两次赋值都在 SessionDisconnected 内（瞬态前提）：
+    //     若它们分属两个 mutation，CLOSING 就会变成可观测状态，本用例的前提失效。
+    const std::string session_disconnected =
+        FunctionWindow(service_source, "MeetingService::SessionDisconnected");
+    ASSERT_FALSE(session_disconnected.empty());
+    EXPECT_NE(session_disconnected.find("record.state = DomainSessionState::CLOSING;"),
+              std::string::npos);
+    EXPECT_NE(session_disconnected.find("record.state = DomainSessionState::CLOSED;"),
+              std::string::npos);
+}
+
+// ------------------------------------------------------------------------------
+// SS2：CLOSED tombstone ⇒ SESSION_STATE_REJECTED（而不是 AUTH_REQUIRED）。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, SS2_ClosedTombstoneYieldsSessionStateRejected) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    const std::string meeting_id = pipeline.Dispatcher().LastCreatedMeetingId();
+    ASSERT_EQ(meeting_id, std::string(kFirstMeetingId));
+
+    // 领域侧断线：AUTHENTICATED → CLOSING → CLOSED（tombstone 保留）。
+    ASSERT_TRUE(pipeline.EnqueueAndWait(MakeSessionDisconnectedWork(kDispatchHostSession)));
+
+    // 传输侧仍然存活（目录项未被移除）：因此 response 一定会被产出，
+    // 断言落在产出的消息本身上。
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-query-closed-session", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::QUERY, meeting_id)));
+
+    const std::vector<MeetingOutboundMessage> responses = pipeline.Responses();
+    ASSERT_EQ(responses.size(), static_cast<std::size_t>(2));   // create + 本条
+    const MeetingResponseMessage& response = responses.back().response;
+
+    EXPECT_EQ(response.result_code, meeting::ResultCode::SESSION_STATE_REJECTED);
+    EXPECT_EQ(response.result_name, std::string("SESSION_STATE_REJECTED"));
+    EXPECT_EQ(response.disposition, meeting::ResultDisposition::ERROR);
+    EXPECT_NE(response.result_code, meeting::ResultCode::AUTH_REQUIRED);
+    EXPECT_FALSE(response.has_view);
+
+    // sink 侧记录的领域结果一致（两条独立观测路径互相印证）。
+    const std::vector<MeetingCommandOutcome> outcomes = pipeline.Sink().Outcomes();
+    ASSERT_FALSE(outcomes.empty());
+    EXPECT_EQ(outcomes.back().result_code, meeting::ResultCode::SESSION_STATE_REJECTED);
+}
+
+// ------------------------------------------------------------------------------
+// SS3：从未 REGISTER 的 Session ⇒ AUTH_REQUIRED（与 SS2 形成对照）。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, SS3_NeverRegisteredSessionYieldsAuthRequired) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    const std::string meeting_id = pipeline.Dispatcher().LastCreatedMeetingId();
+
+    // 只存在于判活目录（传输侧存活），领域从未登记 ⇒ 未认证。
+    pipeline.AddDirectoryEntry(kDispatchStrangerSession);
+
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-query-unknown", kDispatchStrangerSession, kDispatchStrangerUser,
+        ClientMeetingCommandKind::QUERY, meeting_id)));
+
+    const std::vector<MeetingOutboundMessage> responses = pipeline.Responses();
+    ASSERT_EQ(responses.size(), static_cast<std::size_t>(2));
+    const MeetingResponseMessage& response = responses.back().response;
+
+    EXPECT_EQ(response.result_code, meeting::ResultCode::AUTH_REQUIRED);
+    EXPECT_EQ(response.result_name, std::string("AUTH_REQUIRED"));
+    EXPECT_NE(response.result_code, meeting::ResultCode::SESSION_STATE_REJECTED);
+    EXPECT_EQ(response.response_target_session_id,
+              std::string(kDispatchStrangerSession));
+}
+
+// ------------------------------------------------------------------------------
+// SS4：即使 adapter 无法解析 response 目标，也**不能改写**领域 result_code。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, SS4_UnresolvableTargetDoesNotRewriteDomainResult) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    const std::string meeting_id = pipeline.Dispatcher().LastCreatedMeetingId();
+    ASSERT_EQ(pipeline.Responses().size(), static_cast<std::size_t>(1));
+
+    // 传输侧消失（等价于 ClearSession ⇒ erase），领域记录与会议都还在。
+    pipeline.RemoveDirectoryEntry(kDispatchHostSession);
+
+    const MeetingAdapterCounters before = pipeline.RealAdapter().Snapshot();
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-query-lost-target", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::QUERY, meeting_id)));
+    const MeetingAdapterCounters delta = Delta(before, pipeline.RealAdapter().Snapshot());
+
+    // (a) 没有产出 —— 只有这一点由"目标不可解析"决定。
+    EXPECT_EQ(pipeline.Responses().size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(delta.response_produced, static_cast<std::uint64_t>(0));
+    EXPECT_EQ(delta.target_missing, static_cast<std::uint64_t>(1));
+    EXPECT_EQ(delta.adapter_exception, static_cast<std::uint64_t>(0));
+
+    // (b) 领域结果**没有**被改写：sink 记录的仍是领域真实结果 OK，
+    //     并且领域状态没有被适配层的失败触碰。
+    const std::vector<MeetingCommandOutcome> outcomes = pipeline.Sink().Outcomes();
+    ASSERT_FALSE(outcomes.empty());
+    EXPECT_EQ(outcomes.back().result_code, meeting::ResultCode::OK);
+    EXPECT_EQ(outcomes.back().result_name, std::string("OK"));
+    EXPECT_EQ(outcomes.back().disposition, meeting::ResultDisposition::SUCCESS);
+    EXPECT_TRUE(pipeline.Dispatcher().HasActiveMeeting(meeting_id));
+    EXPECT_FALSE(pipeline.Dispatcher().HasClosedSnapshot(meeting_id));
+}
+
+// ------------------------------------------------------------------------------
+// SS5：目标不存在时不产生第二条 response，也不伪造新的业务失败结果。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, SS5_MissingTargetProducesNoSecondOrFabricatedResponse) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    const std::string meeting_id = pipeline.Dispatcher().LastCreatedMeetingId();
+
+    pipeline.RemoveDirectoryEntry(kDispatchHostSession);
+
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-query-vanished", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::QUERY, meeting_id)));
+
+    // 恰好只有 create 那一条 response：既没有第二条，也没有"伪造的失败 response"。
+    const std::vector<std::string> request_ids = ResponseRequestIds(pipeline.Responses());
+    ASSERT_EQ(request_ids.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(request_ids[0], std::string("req-create"));
+    EXPECT_EQ(std::find(request_ids.begin(), request_ids.end(),
+                        std::string("req-query-vanished")),
+              request_ids.end());
+
+    // 也没有把该请求"改写"成别的业务失败结果：领域侧记录的仍是真实 OK，
+    // 适配层既没有产出、也没有伪造第二条。
+    const std::vector<MeetingCommandOutcome> outcomes = pipeline.Sink().Outcomes();
+    ASSERT_FALSE(outcomes.empty());
+    EXPECT_EQ(outcomes.back().command, ClientMeetingCommandKind::QUERY);
+    EXPECT_EQ(outcomes.back().result_code, meeting::ResultCode::OK);
+    EXPECT_EQ(outcomes.back().result_name, std::string("OK"));
+}
+
+// ==============================================================================
+// 组 7：顺序与生命周期（OR1–OR5）
+// ==============================================================================
+
+// ------------------------------------------------------------------------------
+// OR1：response 的实际 Collect 顺序 == 入队顺序，request_id 一一对应。
+//
+// 同一批次里 CREATE 先于 QUERY/CLOSE，因此后两者使用注入来源确定的 meeting id；
+// 用例先断言 CREATE 的 response 确实用了该 id（前提失效时立即失败，不会假通过）。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, OR1_ResponseOrderMatchesEnqueueOrder) {
+    DispatchPipeline pipeline;
+    pipeline.AddDirectoryEntry(kDispatchHostSession);
+    ASSERT_TRUE(pipeline.EnqueueAndWait(
+        DispatchPipeline::BootstrapWork(kDispatchHostSession, kDispatchHostUser)));
+
+    std::vector<LogicWorkItem> batch;
+    batch.push_back(pipeline.Command("req-create", kDispatchHostSession,
+                                     kDispatchHostUser, ClientMeetingCommandKind::CREATE,
+                                     std::string()));
+    batch.push_back(pipeline.Command("req-q1", kDispatchHostSession, kDispatchHostUser,
+                                     ClientMeetingCommandKind::QUERY, kFirstMeetingId));
+    batch.push_back(pipeline.Command("req-close", kDispatchHostSession,
+                                     kDispatchHostUser, ClientMeetingCommandKind::CLOSE,
+                                     kFirstMeetingId));
+    ASSERT_TRUE(pipeline.EnqueueAndWait(batch));
+
+    const std::vector<MeetingOutboundMessage> responses = pipeline.Responses();
+    const std::vector<std::string> request_ids = ResponseRequestIds(responses);
+    const std::vector<ClientMeetingCommandKind> commands = ResponseCommands(responses);
+
+    ASSERT_EQ(request_ids.size(), static_cast<std::size_t>(3));
+    EXPECT_EQ(request_ids[0], std::string("req-create"));
+    EXPECT_EQ(request_ids[1], std::string("req-q1"));
+    EXPECT_EQ(request_ids[2], std::string("req-close"));
+
+    EXPECT_EQ(commands[0], ClientMeetingCommandKind::CREATE);
+    EXPECT_EQ(commands[1], ClientMeetingCommandKind::QUERY);
+    EXPECT_EQ(commands[2], ClientMeetingCommandKind::CLOSE);
+
+    // correlation 与 target 一一对应（不是复用同一条消息）。
+    for (std::size_t i = 0; i < responses.size(); ++i) {
+        EXPECT_EQ(responses[i].response.response_target_session_id,
+                  std::string(kDispatchHostSession));
+    }
+    EXPECT_EQ(responses[0].response.view.meeting_id, std::string(kFirstMeetingId));
+
+    // FINALIZE_CLOSE 的响应式产物（通知）在所有 response 之后。
+    EXPECT_EQ(pipeline.Notifications().size(), static_cast<std::size_t>(1));
+}
+
+// ------------------------------------------------------------------------------
+// OR2：adapter 不改变唯一 FIFO 顺序；FINALIZE_CLOSE 仍按原条件加入**尾部**。
+//
+// 证据是 M4 §10.3 的"入队瞬间队列快照"（RecordInternalWorkEnqueued，在队列锁内
+// 生成），而不是事后猜测。因此本用例对顺序的断言是**确定性**的。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, OR2_FinalizeCloseStillQueuesBehindPendingWork) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    const std::size_t responses_before = pipeline.Responses().size();
+
+    // CLOSE 之后还排着一条 QUERY：FINALIZE_CLOSE 必须排在它**后面**。
+    std::vector<LogicWorkItem> batch;
+    batch.push_back(pipeline.Command("req-close", kDispatchHostSession,
+                                     kDispatchHostUser, ClientMeetingCommandKind::CLOSE,
+                                     kFirstMeetingId));
+    batch.push_back(pipeline.Command("req-after-close", kDispatchHostSession,
+                                     kDispatchHostUser, ClientMeetingCommandKind::QUERY,
+                                     kFirstMeetingId));
+    ASSERT_TRUE(pipeline.EnqueueAndWait(batch));
+
+    // (a) 入队瞬间快照：队列内容恰好是 [待处理的 QUERY, FINALIZE_CLOSE]。
+    const std::vector<LogicWorkKind> enqueued_kinds = pipeline.Sink().InternalEnqueueKinds();
+    const std::vector<std::vector<LogicWorkKind> > queue_snapshots =
+        pipeline.Sink().InternalEnqueueQueueKinds();
+    ASSERT_EQ(enqueued_kinds.size(), static_cast<std::size_t>(1));   // 恰好一个 FINALIZE_CLOSE
+    EXPECT_EQ(enqueued_kinds[0], LogicWorkKind::FINALIZE_CLOSE);
+    ASSERT_EQ(queue_snapshots.size(), static_cast<std::size_t>(1));
+    ASSERT_EQ(queue_snapshots[0].size(), static_cast<std::size_t>(2));
+    EXPECT_EQ(queue_snapshots[0][0], LogicWorkKind::MEETING_COMMAND);   // 不插队
+    EXPECT_EQ(queue_snapshots[0][1], LogicWorkKind::FINALIZE_CLOSE);    // 追加在尾部
+
+    // (b) 可观测顺序同样成立：CLOSE 的 response → QUERY 的 response → 通知。
+    const std::vector<MeetingOutboundMessage> responses = pipeline.Responses();
+    ASSERT_EQ(responses.size(), responses_before + 2);
+    const std::vector<std::string> request_ids = ResponseRequestIds(responses);
+    EXPECT_EQ(request_ids[request_ids.size() - 2], std::string("req-close"));
+    EXPECT_EQ(request_ids[request_ids.size() - 1], std::string("req-after-close"));
+    EXPECT_EQ(pipeline.Notifications().size(), static_cast<std::size_t>(1));
+
+    // 收敛已经发生：FINALIZE_CLOSE 虽然排在尾部，但确实被处理了。
+    EXPECT_TRUE(pipeline.Dispatcher().HasClosedSnapshot(kFirstMeetingId));
+}
+
+// ------------------------------------------------------------------------------
+// OR3：合法 Close 的 response 反映 turn 1 的 ENDING；FINALIZE_CLOSE 是 turn 2，
+//      之后收敛为 CLOSED；通知只从**最终**领域结果生成。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, OR3_CloseResponseShowsEndingThenTurnTwoCloses) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    ASSERT_EQ(pipeline.Dispatcher().LastCreatedMeetingId(), std::string(kFirstMeetingId));
+
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-close", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::CLOSE, kFirstMeetingId)));
+
+    // turn 1：response 反映 ENDING（还没有收敛）。
+    const std::vector<MeetingOutboundMessage> responses = pipeline.Responses();
+    ASSERT_FALSE(responses.empty());
+    const MeetingResponseMessage& close_response = responses.back().response;
+    EXPECT_EQ(close_response.command, ClientMeetingCommandKind::CLOSE);
+    EXPECT_EQ(close_response.request_id, std::string("req-close"));
+    EXPECT_EQ(close_response.result_code, meeting::ResultCode::OK);
+    EXPECT_EQ(close_response.disposition, meeting::ResultDisposition::SUCCESS);
+    EXPECT_TRUE(close_response.has_view);
+    EXPECT_EQ(close_response.view.meeting_state, meeting::MeetingState::ENDING);
+    EXPECT_FALSE(close_response.view.has_closed_at);
+
+    // turn 2 已完成：领域已收敛到 CLOSED。
+    EXPECT_TRUE(pipeline.Dispatcher().HasClosedSnapshot(kFirstMeetingId));
+    EXPECT_FALSE(pipeline.Dispatcher().HasActiveMeeting(kFirstMeetingId));
+
+    // sink 记录的 FinalizeClose：finalized == true，且通知意图来自冻结上下文。
+    const std::vector<std::pair<bool, bool> > finalize_flags =
+        pipeline.Sink().FinalizeFlags();
+    ASSERT_EQ(finalize_flags.size(), static_cast<std::size_t>(1));
+    EXPECT_TRUE(finalize_flags[0].first);    // finalized
+    EXPECT_FALSE(finalize_flags[0].second);  // not already_finalized
+    const std::vector<std::vector<meeting::SessionId> > finalize_targets =
+        pipeline.Sink().FinalizeTargets();
+    ASSERT_EQ(finalize_targets.size(), static_cast<std::size_t>(1));
+    ASSERT_EQ(finalize_targets[0].size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(finalize_targets[0][0], std::string(kDispatchHostSession));
+
+    // 通知**只**来自最终领域结果：其 event_id 必须等于 turn 2 产生的
+    // MEETING_CLOSED 事件 id，状态投影必须是 CLOSED。
+    const std::vector<LogicWorkKind> dispatched_kinds = pipeline.Sink().DispatchedKinds();
+    const std::vector<std::vector<WorkDomainEvent> > dispatched_events =
+        pipeline.Sink().DispatchedEvents();
+    ASSERT_EQ(dispatched_kinds.size(), dispatched_events.size());
+    std::size_t finalize_index = dispatched_kinds.size();
+    for (std::size_t i = 0; i < dispatched_kinds.size(); ++i) {
+        if (dispatched_kinds[i] == LogicWorkKind::FINALIZE_CLOSE) {
+            finalize_index = i;
+            break;
+        }
+    }
+    ASSERT_LT(finalize_index, dispatched_kinds.size());
+    ASSERT_EQ(dispatched_events[finalize_index].size(), static_cast<std::size_t>(1));
+    const WorkDomainEvent& closed_event = dispatched_events[finalize_index][0];
+    EXPECT_EQ(closed_event.type, meeting::EventType::MEETING_CLOSED);
+    EXPECT_EQ(closed_event.meeting_state_after, meeting::MeetingState::CLOSED);
+    EXPECT_EQ(closed_event.meeting_id, std::string(kFirstMeetingId));
+
+    const std::vector<MeetingOutboundMessage> notifications = pipeline.Notifications();
+    ASSERT_EQ(notifications.size(), static_cast<std::size_t>(1));
+    EXPECT_EQ(notifications[0].notification.notification_type,
+              meeting::EventType::MEETING_CLOSED);
+    EXPECT_EQ(notifications[0].notification.meeting_id, std::string(kFirstMeetingId));
+    EXPECT_EQ(notifications[0].notification.notification_target_session_id,
+              std::string(kDispatchHostSession));
+    EXPECT_TRUE(notifications[0].notification.has_event_id);
+    EXPECT_EQ(notifications[0].notification.event_id, closed_event.event_id);
+    EXPECT_TRUE(notifications[0].notification.has_correlation_request_id);
+    EXPECT_EQ(notifications[0].notification.correlation_request_id,
+              std::string("req-close"));
+
+    // 通知在 CLOSE 的 response **之后**产出（同一 turn 内的下游产物，不倒序）。
+    // 两者由不同的容器记录，这里用"通知存在且 turn 1 的 response 仍是最后一条
+    // response"来确认它们不是同一条消息、也没有互相替代。
+    EXPECT_EQ(pipeline.Responses().size(), responses.size());
+}
+
+// ------------------------------------------------------------------------------
+// OR4：SerializedWorkExecutor::StopAndJoin 的幂等性与"停止后拒绝新外部 work"。
+//
+// 注意范围：文档 OR4 的正式目标是 LogicSystem::ShutdownWorkExecutor（M6.6）。
+// 本轮只能核实**它将来会调用**的底层执行器原语，不做任何生产装配改动。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, OR4_StopAndJoinIsIdempotentAndRejectsNewWork) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    ASSERT_TRUE(pipeline.Dispatcher().HasActiveMeeting(kFirstMeetingId));
+
+    pipeline.Executor().StopAndJoin();
+    pipeline.Executor().StopAndJoin();   // 幂等：不崩溃、不重复 join
+
+    // stop 之后外部 work 一律被拒绝（Push 的 stopping_ 闸门），且不被处理。
+    const std::size_t responses_before = pipeline.Responses().size();
+    EXPECT_FALSE(pipeline.Executor().PostMeetingCommand(
+        pipeline.Command("req-after-stop", kDispatchHostSession, kDispatchHostUser,
+                         ClientMeetingCommandKind::QUERY, kFirstMeetingId)
+            .meeting_context,
+        ClientMeetingCommandKind::QUERY, kFirstMeetingId));
+    EXPECT_EQ(pipeline.Responses().size(), responses_before);
+
+    // 领域状态仍可只读访问（执行器停止不等于领域被销毁）。
+    EXPECT_TRUE(pipeline.Dispatcher().HasActiveMeeting(kFirstMeetingId));
+}
+
+// ------------------------------------------------------------------------------
+// OR5（契约级）：目录的强/弱引用契约在 dispatcher 装配下仍然成立。
+//
+// 真实 ChatServer 关闭过程中"目录仍然可用"的顺序属于 M6.6 装配 + M6.7 runtime
+// smoke，**本轮 NOT VERIFIED**。这里只证明 adapter 所依赖的既有契约：
+// 目录最后一个强引用释放后 weak 立即失效，此后出站只 no-op。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, OR5_DirectoryStrongWeakContractUnderDispatcher) {
+    DispatchPipeline pipeline;
+    ASSERT_TRUE(pipeline.BootstrapHostAndCreate());
+    ASSERT_EQ(pipeline.Responses().size(), static_cast<std::size_t>(1));
+
+    // 测试独占目录的唯一强引用 ⇒ reset 之后 weak 必然失效（§8.4）。
+    pipeline.ReleaseDirectoryStrongRefs();
+
+    const MeetingAdapterCounters before = pipeline.RealAdapter().Snapshot();
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-query-no-directory", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::QUERY, kFirstMeetingId)));
+    const MeetingAdapterCounters delta = Delta(before, pipeline.RealAdapter().Snapshot());
+
+    // 整次调用 no-op：不崩溃、不产出、只计一次 directory_unavailable。
+    EXPECT_EQ(delta.directory_unavailable, static_cast<std::uint64_t>(1));
+    EXPECT_EQ(delta.response_produced, static_cast<std::uint64_t>(0));
+    EXPECT_EQ(delta.target_resolved, static_cast<std::uint64_t>(0));
+    EXPECT_EQ(delta.target_missing, static_cast<std::uint64_t>(0));
+    EXPECT_EQ(pipeline.Responses().size(), static_cast<std::size_t>(1));
+
+    // 领域结果不受影响（sink 记录仍是 OK）。
+    const std::vector<MeetingCommandOutcome> outcomes = pipeline.Sink().Outcomes();
+    ASSERT_FALSE(outcomes.empty());
+    EXPECT_EQ(outcomes.back().result_code, meeting::ResultCode::OK);
+}
+
+// ==============================================================================
+// EX1：adapter 违约抛异常时，唯一消费者仍然存活，领域结果不回滚，Close 仍然收敛。
+// ==============================================================================
+
+// ------------------------------------------------------------------------------
+// 为什么必须有这一层守卫（§13.4 / R-7）：
+//   SerializedWorkExecutor::WorkerLoop 没有通用 try/catch，异常从 DispatchWork
+//   逃逸就会穿出 std::thread 的入口函数 ⇒ std::terminate（整进程终止），
+//   并且 in_flight_ 不再归零。生产 adapter 是 noexcept 实现，但**接口不是**，
+//   因此 dispatcher 必须在调用边界上兜住违约实现。
+//
+// 本用例用"七项 On* 全抛"的替身证明：每个调用点都被守住、计数可断言、
+// 后续 work 继续被处理、CLOSE 派生的 FINALIZE_CLOSE 仍然入队并完成收敛。
+// ------------------------------------------------------------------------------
+TEST(DispatcherAdapterIntegration, EX1_AdapterViolationDoesNotKillTheConsumer) {
+    DispatchPipeline pipeline(DispatchPipeline::kThrowingAdapter);
+    pipeline.AddDirectoryEntry(kDispatchHostSession);
+    ASSERT_TRUE(pipeline.EnqueueAndWait(
+        DispatchPipeline::BootstrapWork(kDispatchHostSession, kDispatchHostUser)));
+
+    // CREATE：adapter 抛异常，但领域 mutation 已完成、消费者仍然活着。
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-create", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::CREATE, std::string())));
+    EXPECT_EQ(pipeline.Dispatcher().LastCreatedMeetingId(), std::string(kFirstMeetingId));
+    EXPECT_EQ(pipeline.Dispatcher().AdapterExceptionCount(), static_cast<std::size_t>(1));
+    EXPECT_EQ(pipeline.ThrowingTestAdapter().Calls(), static_cast<std::uint64_t>(1));
+
+    // QUERY：消费者继续处理后续 work（若线程已死，这里会等待超时 / 进程终止）。
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-query", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::QUERY, kFirstMeetingId)));
+    EXPECT_EQ(pipeline.Dispatcher().AdapterExceptionCount(), static_cast<std::size_t>(2));
+    EXPECT_TRUE(pipeline.Dispatcher().HasActiveMeeting(kFirstMeetingId));
+
+    // CLOSE：adapter 违约**不阻止** FINALIZE_CLOSE 入队，两 turn 仍然收敛。
+    //
+    // 等待到静止时，同一批次内已经跑完两个 turn：turn 1 的 OnCloseMeeting 与
+    // turn 2 的 OnFinalizeClose 各违约一次，因此计数从 2 变成 4。
+    ASSERT_TRUE(pipeline.EnqueueAndWait(pipeline.Command(
+        "req-close", kDispatchHostSession, kDispatchHostUser,
+        ClientMeetingCommandKind::CLOSE, kFirstMeetingId)));
+    EXPECT_EQ(pipeline.Dispatcher().AdapterExceptionCount(), static_cast<std::size_t>(4));
+    EXPECT_EQ(pipeline.ThrowingTestAdapter().Calls(), static_cast<std::uint64_t>(4));
+
+    // 收敛没有被 adapter 的违约影响（领域效果在 adapter 之前已经落地）。
+    EXPECT_TRUE(pipeline.Dispatcher().HasClosedSnapshot(kFirstMeetingId));
+    EXPECT_FALSE(pipeline.Dispatcher().HasActiveMeeting(kFirstMeetingId));
+
+    // sink 观测到的 finalize 结果仍是真实的 finalized == true。
+    const std::vector<std::pair<bool, bool> > finalize_flags =
+        pipeline.Sink().FinalizeFlags();
+    ASSERT_EQ(finalize_flags.size(), static_cast<std::size_t>(1));
+    EXPECT_TRUE(finalize_flags[0].first);
+}
+
+// ==============================================================================
+// ORD：调用点顺序的静态核对（§5 / §6.5 的顺序硬约束）
+//
+// 顺序要求（对每个调用点都必须成立）：
+//   1. 领域 mutation 已经返回结果（result 是 const 引用 ⇒ 结构上不可能先调用）
+//   2. 既有 sink_ 观测先完成（原有观测顺序不得被 adapter 插入或改变）
+//   3. adapter 调用在 sink 之后
+//   4. DispatchClose：adapter 在**入队判断之前**
+//
+// 这一条用真实源码的函数窗口做静态核对：顺序是代码结构属性，
+// 用文本位置即可判定，且能直接抓住"把 adapter 挪到 sink 之前/入队之后"的回归。
+// ==============================================================================
+TEST(DispatcherAdapterIntegration, ORD_CallSitesKeepSinkBeforeAdapter) {
+    const std::string code = StripComments(ReadSourceFile(kDispatcherSourcePath));
+    ASSERT_FALSE(code.empty()) << "cannot read " << kDispatcherSourcePath;
+
+    struct Expectation {
+        const char* function_marker;
+        const char* sink_marker;
+        const char* adapter_marker;
+    };
+    const Expectation expectations[] = {
+        { "LogicWorkDispatcher::DispatchCreate", "sink_->RecordMeetingCommand",
+          "adapter_->OnCreateMeeting" },
+        { "LogicWorkDispatcher::DispatchJoin", "sink_->RecordMeetingCommand",
+          "adapter_->OnJoinMeeting" },
+        { "LogicWorkDispatcher::DispatchLeave", "sink_->RecordMeetingCommand",
+          "adapter_->OnLeaveMeeting" },
+        { "LogicWorkDispatcher::DispatchClose", "sink_->RecordMeetingCommand",
+          "adapter_->OnCloseMeeting" },
+        { "LogicWorkDispatcher::DispatchQuery", "sink_->RecordMeetingCommand",
+          "adapter_->OnQueryMeeting" },
+        { "LogicWorkDispatcher::DispatchListParticipants", "sink_->RecordMeetingCommand",
+          "adapter_->OnListParticipants" },
+    };
+
+    for (std::size_t i = 0; i < sizeof(expectations) / sizeof(expectations[0]); ++i) {
+        const std::string window = FunctionWindow(code, expectations[i].function_marker);
+        ASSERT_FALSE(window.empty()) << "missing function: " << expectations[i].function_marker;
+
+        const std::size_t sink_pos = window.find(expectations[i].sink_marker);
+        const std::size_t adapter_pos = window.find(expectations[i].adapter_marker);
+        ASSERT_NE(sink_pos, std::string::npos)
+            << "no sink record in " << expectations[i].function_marker;
+        ASSERT_NE(adapter_pos, std::string::npos)
+            << "no adapter call in " << expectations[i].function_marker;
+        EXPECT_LT(sink_pos, adapter_pos)
+            << "adapter must be called after the sink record in "
+            << expectations[i].function_marker;
+
+        // adapter 调用必须存在"非空才调用"的守卫，否则 nullptr 注入会崩。
+        EXPECT_NE(window.find("if (adapter_ != nullptr)"), std::string::npos)
+            << "missing null guard in " << expectations[i].function_marker;
+        // 且必须被异常守卫包住（抽象接口可能违约）。
+        EXPECT_NE(window.find("InvokeAdapterGuarded"), std::string::npos)
+            << "missing exception guard in " << expectations[i].function_marker;
+    }
+
+    // DispatchClose：adapter 必须在 FINALIZE_CLOSE 入队**之前**。
+    const std::string close_window =
+        FunctionWindow(code, "LogicWorkDispatcher::DispatchClose");
+    ASSERT_FALSE(close_window.empty());
+    const std::size_t close_adapter = close_window.find("adapter_->OnCloseMeeting");
+    const std::size_t close_enqueue = close_window.find("PostInternalWork(MakeFinalizeCloseWork");
+    ASSERT_NE(close_adapter, std::string::npos);
+    ASSERT_NE(close_enqueue, std::string::npos);
+    EXPECT_LT(close_adapter, close_enqueue)
+        << "adapter must run before the derived FINALIZE_CLOSE is enqueued";
+
+    // FINALIZE_CLOSE 分支：RecordFinalizeClose 在 OnFinalizeClose 之前。
+    const std::size_t finalize_sink = code.find("sink_->RecordFinalizeClose");
+    const std::size_t finalize_adapter = code.find("adapter_->OnFinalizeClose");
+    ASSERT_NE(finalize_sink, std::string::npos);
+    ASSERT_NE(finalize_adapter, std::string::npos);
+    EXPECT_LT(finalize_sink, finalize_adapter)
+        << "adapter must be called after RecordFinalizeClose";
+
+    // 七个调用点，不多不少（不得出现第八个业务回调）。
+    EXPECT_EQ(CountOccurrences(code, "adapter_->On"), static_cast<std::size_t>(7));
+    // 每个调用点都经由守卫（按**调用形式**计数，避免把模板定义本身算进去）。
+    EXPECT_EQ(CountOccurrences(code, "InvokeAdapterGuarded(adapter_exception_count_"),
+              static_cast<std::size_t>(7));
+    EXPECT_EQ(CountOccurrences(code, "void InvokeAdapterGuarded("),
+              static_cast<std::size_t>(1));
 }

@@ -4,6 +4,11 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
+// M6.5：dispatcher 只认识抽象接口，但调用虚函数需要完整类型，因此 .cpp 引入该头。
+// 依赖边界不变：MeetingResponseNotificationAdapter.h 只依赖标准库 + 纯领域头文件，
+// 不引入 asio / Redis / MySQL / gRPC / protobuf（§5.3 / §16.5）。
+#include "MeetingResponseNotificationAdapter.h"
+
 // ==============================================================================
 // M4 生产 Meeting 分发器实现。
 //
@@ -13,6 +18,11 @@
 //
 // 时间来源故意使用 std::chrono::system_clock::now()：它出现在**集成层**，
 // 而不是出现在 MeetingService 内部（M3 §4 明确禁止领域层直接取时间）。
+//
+// M6.5 追加：六个 Response 调用点 + 一个 FINALIZE_CLOSE 调用点（§6.5）。
+//   顺序冻结为：领域 mutation → 既有 sink 观测 → adapter 调用 → 正常返回；
+//   DispatchClose 额外保留"adapter 之后才判断 should_schedule_finalize 并入队"。
+//   adapter 为 nullptr 时，代码路径与 M4 完全一致（调用点整体跳过）。
 // ==============================================================================
 
 namespace {
@@ -23,6 +33,30 @@ std::string MakeUuidText(const char* prefix) {
     static boost::uuids::random_generator generator;
     const boost::uuids::uuid value = generator();
     return std::string(prefix) + boost::uuids::to_string(value);
+}
+
+// ------------------------------------------------------------------------------
+// M6.5 / §13.4：adapter 调用的**最小**异常隔离。
+//
+// dispatcher 持有的是抽象接口指针：M6.4 的生产实现是 noexcept，但**接口本身不是**，
+// 因此任何实现都可能违约抛异常。而 SerializedWorkExecutor 的 WorkerLoop 没有
+// 通用 try/catch —— 异常一旦从 DispatchWork 逃逸，就会从 std::thread 的入口函数
+// 逃出 ⇒ std::terminate（整进程终止），且 in_flight_ 不再归零（等待方永久等不到
+// 静止）。所以守卫必须加在**调用边界**上，而不是指望实现自觉。
+//
+// 守卫只做三件事：调用、吞异常、计一次数。
+//   · 不回写领域状态（领域结果已经落地，且是 const 引用）；
+//   · 不影响 sink 观测（sink 已在调用点之前完成）；
+//   · 不阻止 Close 派生的 FINALIZE_CLOSE 入队（入队语句在调用点之后）；
+//   · 不做任何 I/O、不起线程、不建第二套监控。
+// ------------------------------------------------------------------------------
+template <typename Callback>
+void InvokeAdapterGuarded(std::atomic<std::size_t>& failure_count, Callback callback) {
+    try {
+        callback();
+    } catch (...) {
+        failure_count.fetch_add(1);
+    }
 }
 
 } // namespace
@@ -131,10 +165,15 @@ meeting::MeetingServiceDependencies MakeSystemMeetingWorkDependencies() {
 
 LogicWorkDispatcher::LogicWorkDispatcher(const meeting::ServerId& local_server_id,
                                          meeting::MeetingServiceDependencies dependencies,
-                                         IWorkObservationSink* sink)
+                                         IWorkObservationSink* sink,
+                                         IMeetingResponseNotificationAdapter* adapter)
     : meeting_service_(local_server_id, dependencies),
-      sink_(sink) {
+      sink_(sink),
+      adapter_(adapter),
+      adapter_exception_count_(0) {
     // 生产传 nullptr => 该观测路径完全没有开销，也不会向任何 sink 写入。
+    // M6.5：adapter 同样允许为 nullptr（M6.6 之前的生产装配就是这个形态），
+    // 此时七个调用点整体跳过，行为与 M4 完全一致。
 }
 
 void LogicWorkDispatcher::DispatchWork(const LogicWorkItem& item) {
@@ -160,6 +199,16 @@ void LogicWorkDispatcher::DispatchWork(const LogicWorkItem& item) {
             sink_->RecordWorkDispatched(item, 0, ToWorkDomainEvents(result.events));
             sink_->RecordFinalizeClose(item.meeting_id, result.finalized,
                                        result.already_finalized, result.notification_session_ids);
+        }
+        // M6.5 / §6.5 第七个调用点：本 turn 的通知产出。
+        // 顺序：领域收敛（已发布 CLOSED 快照、MeetingClosed 恰好一次）→ sink 观测
+        // → adapter 逐目标通知（§7.1，best-effort）。
+        // 这里**不**新增第二次 FinalizeClose，也**不**把通知结果重新投递为 work item：
+        // 通知是本次已受理 work 的同步下游产物（§7.4）。
+        if (adapter_ != nullptr) {
+            InvokeAdapterGuarded(adapter_exception_count_, [this, &result]() {
+                adapter_->OnFinalizeClose(result);
+            });
         }
         return;
     }
@@ -212,6 +261,14 @@ void LogicWorkDispatcher::DispatchCreate(const LogicWorkItem& item) {
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
     }
+
+    // M6.5 / §6.5 调用点 1/6：CREATE 的 response。
+    // 顺序冻结：领域 mutation → 既有 sink 观测 → adapter → 返回。
+    if (adapter_ != nullptr) {
+        InvokeAdapterGuarded(adapter_exception_count_, [this, &item, &result]() {
+            adapter_->OnCreateMeeting(item.meeting_context, result);
+        });
+    }
 }
 
 void LogicWorkDispatcher::DispatchJoin(const LogicWorkItem& item) {
@@ -227,6 +284,13 @@ void LogicWorkDispatcher::DispatchJoin(const LogicWorkItem& item) {
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
     }
+
+    // M6.5 / §6.5 调用点 2/6：JOIN 的 response。
+    if (adapter_ != nullptr) {
+        InvokeAdapterGuarded(adapter_exception_count_, [this, &item, &result]() {
+            adapter_->OnJoinMeeting(item.meeting_context, result);
+        });
+    }
 }
 
 void LogicWorkDispatcher::DispatchLeave(const LogicWorkItem& item) {
@@ -241,6 +305,13 @@ void LogicWorkDispatcher::DispatchLeave(const LogicWorkItem& item) {
         outcome.active_participant_count = result.meeting.active_participant_count;
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
+    }
+
+    // M6.5 / §6.5 调用点 3/6：LEAVE 的 response。
+    if (adapter_ != nullptr) {
+        InvokeAdapterGuarded(adapter_exception_count_, [this, &item, &result]() {
+            adapter_->OnLeaveMeeting(item.meeting_context, result);
+        });
     }
 }
 
@@ -261,6 +332,20 @@ void LogicWorkDispatcher::DispatchClose(const LogicWorkItem& item) {
         outcome.active_participant_count = result.meeting.active_participant_count;
         FillEventTypes(result.events, outcome);
         sink_->RecordMeetingCommand(outcome);
+    }
+
+    // M6.5 / §6.5 调用点 4/6：CLOSE（turn 1）的 response。
+    //
+    // 位置是本函数最敏感的一处，必须夹在"领域结果 + sink 观测"之后、
+    // "should_schedule_finalize 判断与入队"之前：
+    //   · adapter 出现在领域 mutation 之前 ⇒ 可能报告未落地的结果（禁止）；
+    //   · adapter 决定/取代 should_schedule_finalize ⇒ 出站失败会改变 Close 的
+    //     两 turn 收敛（禁止，§13.5）；
+    //   · 因此 adapter 既不参与入队判断，也不被入队结果影响。
+    if (adapter_ != nullptr) {
+        InvokeAdapterGuarded(adapter_exception_count_, [this, &item, &result]() {
+            adapter_->OnCloseMeeting(item.meeting_context, result);
+        });
     }
 
     // 两个独立 work item（Step 1.4 §16.5、Step 1.5 §13）：
@@ -289,6 +374,13 @@ void LogicWorkDispatcher::DispatchQuery(const LogicWorkItem& item) {
         outcome.active_participant_count = result.meeting.active_participant_count;
         sink_->RecordMeetingCommand(outcome);
     }
+
+    // M6.5 / §6.5 调用点 5/6：QUERY 的 response。
+    if (adapter_ != nullptr) {
+        InvokeAdapterGuarded(adapter_exception_count_, [this, &item, &result]() {
+            adapter_->OnQueryMeeting(item.meeting_context, result);
+        });
+    }
 }
 
 void LogicWorkDispatcher::DispatchListParticipants(const LogicWorkItem& item) {
@@ -302,6 +394,13 @@ void LogicWorkDispatcher::DispatchListParticipants(const LogicWorkItem& item) {
         outcome.has_closed_at = result.meeting.has_closed_at;
         outcome.active_participant_count = result.meeting.active_participant_count;
         sink_->RecordMeetingCommand(outcome);
+    }
+
+    // M6.5 / §6.5 调用点 6/6：LIST_PARTICIPANTS 的 response（含 participants / scope）。
+    if (adapter_ != nullptr) {
+        InvokeAdapterGuarded(adapter_exception_count_, [this, &item, &result]() {
+            adapter_->OnListParticipants(item.meeting_context, result);
+        });
     }
 }
 
