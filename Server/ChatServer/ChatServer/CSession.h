@@ -11,6 +11,9 @@
 #include "const.h"
 #include "MsgNode.h"
 #include "SessionDisconnectBridge.h"
+// M6.3：IMeetingLiveSession（const 只读存活标记）。该头只含 <memory>/<string>，
+// 因此把 CSession 变成它的实现者不会给本类引入任何运行时依赖。
+#include "MeetingOutboundChannel.h"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -19,7 +22,15 @@ using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 class CServer;
 
-class CSession : public std::enable_shared_from_this<CSession>
+// M6.3：CSession 同时实现 IMeetingLiveSession（**只读存活标记**）。
+//
+// 两条继承都保留：
+//   - enable_shared_from_this<CSession>：既有异步读写保活机制，语义不变；
+//   - IMeetingLiveSession：只新增一个 **const** 方法 DescribeSessionId()。
+// 刻意不新增任何发送方法、不改变 Send()/Close()/异步读写，也不改变
+// _session_id 的生成方式（§8.2.3）。
+class CSession : public std::enable_shared_from_this<CSession>,
+	public IMeetingLiveSession
 {
 public:
 	CSession(boost::asio::io_context& io_context, CServer* server);
@@ -28,6 +39,11 @@ public:
 	std::string& GetSessionId();
 	void SetUserId(int uid);
 	int GetUserId();
+
+	// M6.3（§8.2.2）：只读存活标记的稳定标识，返回值拷贝。
+	// 这是**新增**的只读接口；既有 GetSessionId()（返回可变引用）保持原样，
+	// 不在本轮修改，因此不改变任何既有调用方语义。
+	std::string DescribeSessionId() const override;
 
 	void Start();
 	void Send(char* msg, short max_length, short msgid);

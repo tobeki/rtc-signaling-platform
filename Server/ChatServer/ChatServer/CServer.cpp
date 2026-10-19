@@ -69,3 +69,33 @@ void CServer::ClearSession(std::string session_id) {
 		_sessions.erase(session_id);
 	}
 }
+
+// M6.3（§8.2.2 / §8.3 / §8.5）：IMeetingSessionDirectory 的唯一实现。
+//
+// 生命周期安全的三条保证：
+//   1. **互斥范围**：lock_guard 覆盖整个查找 + 复制过程。临界区结束前，
+//      it->second 里既有的 shared_ptr 已被**复制**出去，引用计数 +1，
+//      因此目标对象在句柄存活期间不会被析构；
+//   2. **控制块唯一**：句柄的唯一来源是 _sessions 中既有的 shared_ptr，
+//      隐式向上转换到 const 接口；不存在第二次 make_shared、不存在从
+//      裸指针重建控制块（那会 double free）；
+//   3. **迭代器不外泄**：it 只在临界区内使用；返回的是 owns-its-own 的
+//      shared_ptr 值，不返回引用、不返回迭代器、不返回裸指针。
+//
+// 边界（必须如实记录）：本方法自身加锁正确，**不**代表 CServer 的整个
+// Session registry 在所有并发交错下都无竞态 —— 既有的 ClearSession() 前段
+// 读取仍未持 _mutex（§8.5 / §18 R-2），本轮按授权不修。
+std::shared_ptr<const IMeetingLiveSession>
+CServer::FindSessionBySessionId(const std::string& session_id) {
+	std::lock_guard<std::mutex> lock(_mutex);
+
+	std::map<std::string, std::shared_ptr<CSession>>::iterator it = _sessions.find(session_id);
+	if (it == _sessions.end()) {
+		// 未知（或已移除）的 Session：返回空句柄。不抛异常，也不插入条目。
+		return std::shared_ptr<const IMeetingLiveSession>();
+	}
+
+	// CSession 实现 IMeetingLiveSession（§8.2.2）；这里**复制**既有的
+	// shared_ptr<CSession> 并隐式向上转换，绝不从裸指针新建控制块。
+	return it->second;
+}

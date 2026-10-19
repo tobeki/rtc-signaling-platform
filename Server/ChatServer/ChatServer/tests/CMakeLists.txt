@@ -73,6 +73,7 @@ gtest_discover_tests(ChatServerUnitTests)
 
 # ------------------------------------------------------------------------------
 # M6.2: MeetingRequestContextBuilder (CB1-CB6).
+# M6.3: lifetime-safe session lookup (SL1-SL7).
 #
 # Layer C direct-invocation tests. Separate target on purpose:
 #   * it links GTest + MeetingDomain only (no application runtime graph);
@@ -82,6 +83,14 @@ gtest_discover_tests(ChatServerUnitTests)
 # MEETING_CONTEXT_BUILDER_HEADER feeds the CB6 static check with the absolute
 # source path, so the test can assert the builder header never references
 # session internals.
+#
+# M6.3 note (deliberate, and narrower than it looks): the SL tests include
+# CServer.h / CSession.h for *compile-time* assertions only. Those headers pull
+# in Boost.Asio / Boost.Beast **headers**, not libraries: no CServer / CSession
+# object is constructed, no member-function address is taken outside decltype,
+# and the link line is unchanged. The alternative -- a separate build-time
+# check file outside the test target -- would have made the assertions
+# non-reproducible from the repository, so the real headers are preferred.
 # ------------------------------------------------------------------------------
 add_executable(MeetingResponseNotificationAdapterTest
     MeetingResponseNotificationAdapterTest.cpp
@@ -95,6 +104,11 @@ target_include_directories(MeetingResponseNotificationAdapterTest PRIVATE
 
 target_compile_definitions(MeetingResponseNotificationAdapterTest PRIVATE
     MEETING_CONTEXT_BUILDER_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/../MeetingRequestContextBuilder.h"
+    # M6.3: absolute source root for the SL1-SL7 static checks. Same pattern as
+    # MEETING_CONTEXT_BUILDER_HEADER above: the checks read the *real*
+    # CServer.cpp / CSession.cpp / MeetingOutboundChannel.h text instead of
+    # duplicating the production implementation inside the test.
+    CHATSERVER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
 
 target_link_libraries(MeetingResponseNotificationAdapterTest PRIVATE

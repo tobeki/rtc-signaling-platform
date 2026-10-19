@@ -37,6 +37,20 @@ int CSession::GetUserId() {
 	return _user_uid;
 }
 
+// M6.3（§8.2.2）：IMeetingLiveSession 的唯一实现。
+//
+// 语义边界（刻意最小化）：
+//   - 只读取 _session_id 并**返回值拷贝**：调用方拿不到可变引用，
+//     也无法通过返回的 id 反向操作本会话；
+//   - const：只读，不加锁、不修改任何成员，因此可以被
+//     shared_ptr<const IMeetingLiveSession> 句柄安全调用；
+//   - 不读取 _user_uid（F7：该成员构造未初始化，本轮不碰）；
+//   - 不触碰 _socket / _send_que / _send_lock / _b_close：
+//     Send() / Close() / 异步读写的既有语义与并发行为完全不变。
+std::string CSession::DescribeSessionId() const {
+	return _session_id;
+}
+
 void CSession::Start() {
 	AsyncReadHead(HEAD_TOTAL_LEN);
 }
