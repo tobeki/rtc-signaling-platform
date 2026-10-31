@@ -1,6 +1,16 @@
 # Phase 2 - M6：Response / Notification Adapter
 
-> 状态：**DESIGN COMPLETE（M6.0 → M6.0.8 八轮修订；Coding NOT STARTED）**
+> 状态：**M6 IMPLEMENTATION & VERIFICATION COMPLETE — Final Coding Gate PENDING FINAL HUMAN REVIEW**
+>
+> ```text
+> 1. M6 设计                      : COMPLETE
+> 2. M6 实现与本轮范围内的验证    : COMPLETE（M6.1 → M6.7.1 全部完成并已推送；291/291 测试通过）
+> 3. Final Coding Gate            : PENDING FINAL HUMAN REVIEW（本文档是完成候选，不代为批准）
+> ```
+>
+> 收尾轮次：**M6.8 — Documentation Closeout**（只改本文件；完整完成记录见 **§26**）
+> 历史说明：M6.0 → M6.0.8 共九轮为**设计**修订（当时状态为 `DESIGN COMPLETE / Coding NOT STARTED`）；
+>           该状态是 **M6.0.8 时点**的真实记录，已被 §26 的实现与验证记录取代，不再代表当前状态。
 > Phase 2 M-planning 原始基线：`da19189a55ab13058a22c38c228d3043df72bdf6`（M5.1 收尾）
 > 本文档首次提交：`afad0644170b0882ee6b58ed99c493e82909a70f`（`docs(phase2): add M6-response-notification-adapter.md`）
 > 已发布的 M6.0 基线：`3456c7f96767ea23c59f856aca12ba50deb41699`
@@ -9,9 +19,11 @@
 > M6.0.4 发布时的历史基线：`8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**）
 > M6.0.6 发布时的上一轮基线：`a761039ca4162f1016e651a07fca7000b8798c9f`（**已不是当前远端**）
 > 已发布的 M6.0.7 基线：`02447fd507836d3f78bc0be8a24cb225bc91eb48`
-> 本文档当前修订：**M6.0.8 — R-20 Architecture Decision Incorporation**（待人工 Review；工作区状态见 §1.3 与 §24）
-> R-20 设计裁决：**DECIDED（M6.0.8）**；实现与验证：**NOT STARTED**（生产代码未修改）
-> M6 Coding：**NOT STARTED**；Final Coding Gate：**HOLD**（由人工 Review 决定；R-20 验收尚未通过）
+> 本文档当前修订：**M6.8 — Documentation Closeout**（待人工 Review；工作区状态见 §24.6）
+> 历史修订：M6.0.8 — R-20 Architecture Decision Incorporation（已发布；记录见 §19.12）
+> R-20：**IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（D-R20-01 ~ D-R20-04 全部落地；§26.6）
+> M6 Coding：**COMPLETE**（M6.1 → M6.7.1 已实现并已推送；§26.2）
+> Final Coding Gate：**PENDING FINAL HUMAN REVIEW** —— 本文档不宣布 Gate = PASS，也不宣布 Phase 2 整体 COMPLETE
 
 ---
 
@@ -30,12 +42,15 @@
 | **M6.0.4 发布时的历史基线** | `8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**，仅用于追溯） |
 | **M6.0.6 发布时的上一轮基线** | `a761039ca4162f1016e651a07fca7000b8798c9f`（**已不是当前远端**） |
 | **已发布的 M6.0.7 基线** | `02447fd507836d3f78bc0be8a24cb225bc91eb48` — `docs(phase2): fix the BuildAndStart signature and record the Redis blocking risk` |
-| 本修订轮次 | **M6.0.8 — R-20 Architecture Decision Incorporation**（待 Review） |
-| 本修订依据 | 人工架构裁决 **D-R20-01 ~ D-R20-04**（§19.12）；对 `02447fd`（文档）与当前源码（`ChatServer.cpp`、`RedisMgr.h/.cpp`、`const.h`、`LogicSystem.cpp`、`StatusServer/StatusServiceImpl.cpp`）的只读复核；**未修改任何代码** |
-| R-20 设计裁决 | **DECIDED**（四项裁决见 §19.12；方案见 §12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18） |
-| R-20 实现与验证 | **NOT STARTED** —— 生产代码未修改，未通过任何 R-20 验收项 |
-| M6 Coding | **NOT STARTED**；Final Coding Gate：**HOLD** |
-| 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮零修改** |
+| 本修订轮次 | **M6.8 — Documentation Closeout**（只改本文件；完成记录见 §26） |
+| 本修订依据 | M6.1 → M6.7.1 的实际实现与验证记录（§26.2 / §26.3 / §26.4）；对当前 HEAD 的只读复核；**本轮未修改任何代码** |
+| R-20 设计裁决 | **DECIDED**（四项裁决见 §19.12；方案见 §12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18）—— 未被本轮改写 |
+| R-20 实现与验证 | **IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（§26.6；适用条件见 §26.6.2） |
+| M6 实现（M6.1 → M6.7.1） | **COMPLETE**（已实现并已推送；提交清单见 §26.2） |
+| M6 验证 | **COMPLETE（本轮范围内）**：291/291 测试通过（4 轮完整 CTest 记录）；双配置构建通过；C++14 门禁通过（§26.3） |
+| Final Coding Gate | **PENDING FINAL HUMAN REVIEW**（本文档不代为批准） |
+| 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮（M6.8）零修改**（历史状态见下表末行，均已过时） |
+| 〔历史〕M6.0.8 时点状态 | 设计 **DECIDED**；R-20 实现/验证 **NOT STARTED**；M6 Coding **NOT STARTED**；Gate **HOLD**；生产代码零修改 |
 
 ### 1.2 本修订解决的问题
 
@@ -190,7 +205,8 @@ D-R20-04  关闭完成性目标
 
 本轮只改本文件（§2.5）：把上述裁决写成一致、可实施的设计基线。
 生产代码 / 测试代码 / CMake / Phase 1 文档零修改；
-R-20 的**实现与验证仍未开始**，Final Coding Gate 仍为 **HOLD**（状态见 §1.1 / §19.12 / §25）。
+〔M6.0.8 时点〕R-20 的实现与验证尚未开始，Final Coding Gate 仍为 HOLD。
+〔当前状态 —— M6.8 更新〕R-20 已实现并验证通过（§26.6）；Final Coding Gate 为 **PENDING FINAL HUMAN REVIEW**（§26.1）。
 ```
 
 ### 1.3 提交状态（必须与远端事实一致）
@@ -233,12 +249,12 @@ R-20 的**实现与验证仍未开始**，Final Coding Gate 仍为 **HOLD**（�
   **未**执行 git add / commit / push
   **未**修改任何生产代码 / 测试代码 / CMake
 
-⚠️ 本轮的性质（不得误读）:
+⚠️ 〔M6.0.8 时点〕本轮的性质（不得误读；**以下三行是历史状态，现状见 §26**）:
   本节只证明"文档基线一致"。
   它**不**证明 R-20 已修复，也**不**证明 M6 Coding 已获批准：
     · R-20 设计裁决：DECIDED（§19.12）
-    · R-20 实现与验证：NOT STARTED（生产代码未动）
-    · Final Coding Gate：HOLD（§21 / §25）
+    · R-20 实现与验证：NOT STARTED（生产代码未动）        ← 历史
+    · Final Coding Gate：HOLD（§21 / §25）                ← 历史；现为 PENDING FINAL HUMAN REVIEW
 ```
 
 ### 1.4 本修订对 Phase 1 的地位声明
@@ -2567,6 +2583,8 @@ M6 的清理完成性此前只考虑了"返回 false"与"抛异常"两种失败�
 ⇒ 该风险登记为 **R-20**：设计已裁决（DECIDED），实现与验证未开始（NOT STARTED）。
   生产代码在本轮**未修改**；M6.0.8 只把授权与契约写进文档
   （§15.1 / §12.3.16 / §19.12）。
+  〔M6.0.8 时点〕上述"未开始"是当时的真实状态；R-20 随后由 M6.6a 实现、
+  由 M6.7 与 B23–B31 验证完成（现状见 §26.6）。
 ```
 
 ##### 12.3.15.5 候选方案与取舍（M6.0.8 已裁决）
@@ -3311,11 +3329,21 @@ M6.0.8（R-20）测试目标与依赖约束（按**实际依赖**选择最小可
 | **M6.2** | `MeetingRequestContextBuilder.h` + 组 1 用例（CB1–CB6） | builder + 测试 | 删除文件与用例 |
 | **M6.3** | `CServer::FindSessionBySessionId`（`_mutex` 下 find + 复制 shared_ptr）；`CSession` 声明实现 `IMeetingLiveSession`；组 2 用例 | 两个既有文件最小改动 | 回退 `CServer.*`/`CSession.*` |
 | **M6.4** | adapter `.h/.cpp` + `CountingNoWireCollector`；组 3/4/5 用例 | adapter 实现 | 删除 adapter 文件与用例 |
-| **M6.5** | `LogicWorkDispatcher` 增加 adapter 指针与八个调用点；保持 sink 顺序与 FINALIZE_CLOSE 入队不变；组 6/7 用例（含 OR4/OR5） | dispatcher 改动 | 回退 `LogicWorkDispatcher.*` |
+| **M6.5** | `LogicWorkDispatcher` 增加 adapter 指针与 **七个调用点**（六个 Response + 一个 FINALIZE_CLOSE）；保持 sink 顺序与 FINALIZE_CLOSE 入队不变；组 6/7 用例（含 OR4/OR5） | dispatcher 改动 | 回退 `LogicWorkDispatcher.*` |
 | **M6.6a** | **R-20 RedisMgr 契约**（D-R20-03）：稳定 host/pwd、连接/命令超时、有界 `getConnection()`、Close 幂等 + 析构 join、AUTH 空回复与释放、重连停止检查、停止后归还连接的释放、12 个获取点处置；RedisConPool 契约测试（按 §16.5 依赖约束） | `RedisMgr.h/.cpp` + 测试 | 回退 `RedisMgr.*` 与新增测试 |
 | **M6.6** | `LogicSystem` 装配 + 三个新入口；`ChatServer.cpp` 改 `make_shared` + 注册 + 关闭序列 + **HSet 判真/启动失败/signal 生命周期**（依赖 M6.6a）；CMake | 装配与关闭顺序 | 回退 `LogicSystem.*`/`ChatServer.cpp`/CMake |
 | **M6.7** | 全量验证：Linux 双配置构建、ctest（224 + 新增）、C++14 门禁、依赖隔离、runtime smoke（含目录可用证据）、整轮重复并区分既有 flaky | 验证记录 | 回退该步 |
+| **M6.7.1** | **失败退出码修正**：`ChatServer.cpp` 的 `main()` 外层异常分支返回 `EXIT_FAILURE`（+7 行 / −0 行）；A–D 四类路径定向回归 | 单文件最小改动 + 退出码证据 | 回退该 7 行 |
 | **M6.8** | 文档收尾：COMPLETE、Scope Review、验证边界、已知限制、提交命令 | 文档 | 无需回退 |
+
+```text
+执行状态（M6.8 更新，逐项见 §26.2）：
+  M6.1 / M6.2 / M6.3 / M6.4 / M6.5 / M6.6a / M6.6 / M6.7 / M6.7.1 : **全部完成并已推送**
+  M6.8                                                          : 本文件（文档收尾）
+  ⚠ M6.5 的实现范围是**七个** adapter 调用点，不是八个：
+    Adapter 接口只有七项 On*（六个 Response + 一个 OnFinalizeClose，§6.4），
+    调用点与接口一一对应，**不存在**第八个业务回调（历史表述"八个调用点"已按实际实现更正）。
+```
 
 ### 17.2 每步强制 Review focus
 
@@ -3582,10 +3610,21 @@ M6.0.6 的最小范围调整（后果层面）：
 ```
 
 ### R-20：Redis 连接获取可能**无限阻塞**，Cleanup 完成性无界
-（既有代码性质；M6.0.8 已裁决：**设计 DECIDED、实现/验证 NOT STARTED**）
+（既有代码性质；M6.0.8 完成设计裁决；**M6.6a / M6.6 / M6.7 已完成实现与验证**）
 
 ```text
-【状态（M6.0.8，三件事必须分清）】
+【当前状态（M6.8 更新）】
+  · 人工架构裁决：已完成（D-R20-01 ~ D-R20-04，§19.12；未被本轮改写）
+  · 设计基线：已写入（§12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18）
+  · 生产代码：**已实现**（`RedisMgr.h/.cpp`，提交 `526b25a` + `f87245a`；D-R20-03 授权范围）
+  · 验证：**已完成** —— RedisConPool 契约测试 8/8（B28/B29）、双配置构建、
+    runtime smoke 覆盖 Redis 正常 / 不可达 / 认证失败 / 关闭期失联（B24 / B25 / B27）
+  · 合取结论：**IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（§26.6）
+  · **仍然不覆盖**：Class A 构造期内部异常、任意 OS / DNS / 内核级永久阻塞（§26.6.2）
+```
+
+```text
+【状态（M6.0.8 时点 —— 历史；当前状态见本节开头的"当前状态（M6.8 更新）"）】
   · 人工架构裁决：**已完成**（D-R20-01 ~ D-R20-04，§19.12）
   · 设计基线：**已写入本文件**（§12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18）
   · 生产代码：**未修改**；实现与验证：**NOT STARTED**
@@ -3632,10 +3671,15 @@ M6.0.6 的最小范围调整（后果层面）：
   · 采用组合：C3′（有界获取 + hiredis 连接/命令超时）+ C4 + 正确的信号生命周期
   · C3 单独不足（只限制获取，不限制命令）；C5 拒绝（登记≠运行，且会吞 SIGTERM）
 
-【仍未解决的验收缺口】
-  · §21.2 的 B24–B31 全部未执行（生产代码未改）。
-  · B23 的"不可测"限制已按新契约改为"可测有界故障，禁止永久阻塞用例"。
-  · 在该缺口关闭前，本文档不得出现 R-20 的 PASS 结论。
+【验收缺口的关闭记录（M6.8 更新）】
+  · §21.2 的 B23–B31 已全部执行：B23–B27、B30、B31 为运行期 / 自动化验证，
+    B28/B29 为 8 个 RedisConPool 契约用例（结果见 §26.4）。
+  · B23 的"不可测"限制已按新契约改为"可测有界故障，禁止永久阻塞用例"，本轮遵守。
+  · ⇒ 该缺口已关闭；R-20 的 PASS 结论**仅限** §26.6.2 声明的故障模型。
+
+【历史（M6.0.8 时点，保留原文语义）】
+  · 当时 §21.2 的 B24–B31 全部未执行（生产代码未改）；
+    在该缺口关闭前，本文档不得出现 R-20 的 PASS 结论 —— 该纪律在执行期被遵守。
 ```
 
 ### R-19：AUTH 回复未判空（既有缺陷；**空回复检查已纳入 R-20 必要范围**）
@@ -3931,10 +3975,18 @@ C1 拒绝；C2 拒绝；C3 单独不充分；C4 采用（作为硬依赖策略�
 **性质与状态（必须保留）**：
 
 ```text
+〔M6.0.8 时点（历史）〕
 · 本轮只改文档；生产代码 / 测试 / CMake / Phase 1 文档零修改。
 · R-20：设计 DECIDED；实现与验证 NOT STARTED。
 · Final Coding Gate：HOLD —— 直到 §21.2 的 B24–B31 全部执行并通过。
 · 不得把"设计已裁决"写成"R-20 已修复"，也不得写成"Coding Gate 已通过"。
+
+〔当前（M6.8 更新，四个裁决本身**未被改写**）〕
+· D-R20-01 ~ D-R20-04 不变，落地范围与验证证据见 §26.6。
+· R-20：IMPLEMENTED / VERIFIED / PASS (within documented fault model)。
+· B24–B31 已全部执行（§26.4）⇒ 上述 HOLD 前置条件已满足；
+  但 Final Coding Gate 仍为 **PENDING FINAL HUMAN REVIEW**（由人工复审决定，§26.1）。
+· 该 PASS **不含** Class A 构造期内部异常与任意 OS / DNS / 内核级永久阻塞。
 ```
 
 **Phase 1 仍然完全冻结**：D-R20-01 ~ D-R20-04 是 M6 范围内的实现方式选择，
@@ -3973,6 +4025,8 @@ C1 拒绝；C2 拒绝；C3 单独不充分；C4 采用（作为硬依赖策略�
 (a) CServer::FindSessionBySessionId 的实现、CServer 的注册时序、关闭顺序、
     CSession 的实际析构时机 —— 由**静态复核 + runtime smoke**保证，不由单测保证
     （CServer.cpp / CSession.cpp / LogicSystem.cpp / ChatServer.cpp 不在测试 target 内）。
+    〔M6.8 更新〕关闭顺序已由 M6.7 在**隔离副本**（临时诊断标记）中取得运行期顺序证据，
+    生产二进制本身不打印逐步成功日志 ⇒ "按日志断言顺序"仍不可做（§26.4 差异说明）。
 (b) 真实客户端 → Meeting 命令 → 响应 的端到端路径**不存在**（无 Protocol V2）。
 (c) 通知的**送达**不可验证（L5）；异步写失败不可验证（L4）。
 (d) 真实字节交付**未实现**（Phase 3）。
@@ -3980,12 +4034,15 @@ C1 拒绝；C2 拒绝；C3 单独不充分；C4 采用（作为硬依赖策略�
 (f) R-20 的有界性只在本项目声明的条件下验证（Redis 正常 / 不可达 / 空池 /
     accept 后不应答，且超时生效）；**不**覆盖任意 OS 故障、内核级永久阻塞、
     任意线程被挂起、所有 DNS 故障（§12.3.18.3）。
-(g) 超时参数（获取 1 s / 连接 1 s / 命令 2 s）是**初始建议**，须由测试确认；
-    不是生产级 SLA。
+(g) 超时参数（获取 1 s / 连接 1 s / 命令 2 s）：M6.7 的运行期证据显示
+    "Redis 不可达 ⇒ 约 2.0 s 有界失败"、"关闭期失联 ⇒ 约 1.0 s 完成后续清理"，
+    与参数一致；但这**不是**生产级 SLA，也不是端到端总超时保证。
 (h) Redis 恢复只在"运行期 fail_count_ > 0"的情形下有重试路径；
     "构造期空池"不恢复（D-R20-01 下等价于启动失败，而不是自愈）。
-(i) M6.0.8 只写设计契约；在 Coding 与 §21.2 B24–B31 完成前，
-    R-20 的一切行为性结论均为**未验证**。
+(i) 〔历史（M6.0.8 时点）〕只写设计契约；在 Coding 与 §21.2 B24–B31 完成前，
+    R-20 的一切行为性结论均为未验证。
+    〔当前（M6.8 更新）〕B23–B31 已执行，R-20 的行为性结论在 §26.6.2 的故障模型内成立；
+    (f) 所列的排除项**依然排除**。
 ```
 
 ---
@@ -4226,6 +4283,21 @@ C6  仓库内无 build artifact / config.ini / 日志 / 密码
 C7  Windows Debug|x64：**NOT VERIFIED**（Conflict #3 裁决 iii），不得声称通过
 ```
 
+```text
+【M6.8 归档：工程类验收的实际结果（来源：M6.7 / M6.7.1 实际执行记录，§26.3）】
+C1  PASS  Linux 全新 out-of-tree Debug 构建（BUILD_TESTING=ON）+ BUILD_TESTING=OFF 生产构建，
+          两次配置与构建退出码均为 0；**新增告警 0**（仅既有 MysqlDao.cpp:95 一条）
+C2  PASS  291/291（M6.7 连续 3 轮 + M6.7.1 1 轮，共 4 轮完整 CTest，0 失败）；
+          用例总数 = 224（既有 7 个测试文件）+ 67（M6 新增）
+C3  PASS  -std=c++14 -pedantic-errors -Wall -Wextra：M6 触及的 TU 全部 0 error；M6.6 新增代码 0 告警
+C4  PASS  MeetingDomain 源码零改动、仍零依赖；测试 target 链接行仅 GTest + MeetingDomain
+          （RedisConPoolContractTest 另加 hiredis，属既有依赖）；未引入新第三方依赖
+C5  PASS  runtime smoke：Redis 正常 / 不可达 / 认证失败 / 关闭期失联 四态均已实际运行；
+          无意外 terminate / abort；正常 SIGTERM 退出码 0
+C6  PASS  仓库内无新增 build artifact / config.ini / 日志 / 密码（全部验证产物位于 /tmp）
+C7  NOT VERIFIED  Windows Debug|x64 未验证；R6 仍 DEFERRED（§26.7.2）
+```
+
 ### 21.4 文档类
 
 ```text
@@ -4233,6 +4305,15 @@ D1  本文档状态更新为 COMPLETE，补入实际改动清单、测试结果�
 D2  如实记录"真实字节交付仍留 Phase 3"（§7.5）
 D3  如实记录 §20.2 的九条验证边界
 D4  任何对 §15 Scope Matrix 的偏离必须逐条记录并获得授权
+```
+
+```text
+【M6.8 归档：文档类验收】
+D1  DONE  §1.1 / §17.1 / §18 R-20 / §19.12 / §20.2 / §21.3 / §22 / §24.6 / §25 已更新；
+          实际改动清单、测试结果、验证边界与已知限制集中在 §26
+D2  DONE  §7.5 与 §26.7.3 均如实声明"生产 collector 不发送任何字节"
+D3  DONE  §20.2 九条边界保留，其中 (a)(g)(i) 已按实际验证结果更新（仍保留排除项）
+D4  DONE  §26.8 的 Scope Matrix 审查逐项核对；未发现未获授权的偏离
 ```
 
 ---
@@ -4253,6 +4334,14 @@ R6                          = **DEFERRED → 独立任务**
 .sln / .vcxproj / .props / .filters = **不得修改**
 ```
 
+```text
+【M6.8 归档：Linux 权威门禁的实际结果】
+  BUILD_TESTING=ON  配置 0 / 构建 0（4 个目标，含 ChatServer）
+  ctest             291/291 通过（M6.7 三轮 + M6.7.1 一轮）
+  BUILD_TESTING=OFF 配置 0 / 构建 0（ChatServer 生产二进制构建成功；不要求 GTest）
+  ⇒ Linux 门禁 PASS。**不得**据此推断 Windows 通过：Windows 仍为 NOT VERIFIED。
+```
+
 ### 22.2 编码
 
 ```text
@@ -4268,6 +4357,14 @@ R6                          = **DEFERRED → 独立任务**
   RedisMgr.h/.cpp           : **UTF-8（带 BOM）**（经人工显式授权由 GBK 转换；
                               注释已中文化；日志字面量随之使用 UTF-8 执行字符集）
 M6 不主动转换任何既有文件编码；RedisMgr.h/.cpp 的转码是经人工显式授权的例外。
+
+【M6.8 归档：实际编码处理（逐项核对，§26.8）】
+  · RedisMgr.h/.cpp：由 GBK 转为 **UTF-8 with BOM** —— 经人工显式授权（D-R20-03，§2.5 / §19.12），
+    提交 `526b25a`；转换范围仅 ChatServer 的两个文件，其他服务的副本零改动。
+  · ChatServer.cpp：**保持 UTF-8 with BOM**（M6.6 全文件重写与 M6.7.1 单点修改后均经 BOM 校验）。
+  · 其余 M6 修改文件（LogicSystem.* / LogicWorkDispatcher.* / CServer.* / CSession.* / 新增头与源）：
+    UTF-8 无 BOM（CServer.h 保持 ASCII），未发生无关转码。
+  · AsioIOServicePool.h/.cpp 仍为 GBK，**未被修改**。
 ```
 
 ---
@@ -4384,6 +4481,25 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 本轮 add/commit/push: **未执行**（本任务明确禁止提交与推送）
 本轮生产代码/测试/CMake: 零修改
 本轮 R-20 状态     : 设计 DECIDED；实现与验证 NOT STARTED；Final Coding Gate HOLD
+                     （以上均为 **M6.0.8 时点**的历史记录，现状见 §26）
+```
+
+### 24.6 M6.8 的基线（本轮实测）
+
+```text
+进入本轮的远端基线 : origin/dev == HEAD == 90a3cdd6ea42fa7a31b905f14500efdd4b3dede1
+                     （`fix(chatserver): return a non-zero exit code when startup or run fails`
+                      即 M6.7.1 已发布）
+进入本轮时状态     : working tree / index 均 clean；git diff --check 为空
+本轮修改           : 仅 docs/phase2/M6-response-notification-adapter.md
+本轮 add/commit/push: **未执行**（本任务明确禁止提交与推送；由用户手动执行，命令见 §26.11）
+本轮生产代码/测试/CMake: 零修改
+本轮状态结论       : M6 实现与验证 COMPLETE；Final Coding Gate **PENDING FINAL HUMAN REVIEW**
+```
+
+```text
+判定规则（§24.2）不变：本文件"已发布"⇔ HEAD == origin/dev 且 worktree clean。
+上述 hash 只说明"进入 M6.8 时"的基线，不得当作"本修订已发布"的证据。
 ```
 
 ---
@@ -4391,15 +4507,409 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 ## 25. 下一步
 
 ```text
-1. 人工 Review 本修订（M6.0.8），确认 §19.12 的 D-R20-01 ~ D-R20-04；
-   注意：批准"设计"≠ 批准 Coding —— Final Coding Gate 仍为 **HOLD**；
-2. 按 §17.1 切分为独立的 M6.1–M6.8 Coding Prompt（含新增 **M6.6a**：R-20 RedisMgr 契约）；
-3. 每步完成 → Review → Build → Test → 再进入下一步；
-   不得把 M6.1–M6.8 合并成一个 Prompt（STEP-1.6 §26.2 同一纪律）。
+【已完成（历史：M6.0.8 时点列出的三步）】
+1. 人工 Review M6.0.8 并确认 §19.12 的 D-R20-01 ~ D-R20-04        → 已完成
+2. 按 §17.1 切分为独立的 M6.1–M6.8 Coding Prompt（含 M6.6a）       → 已完成（逐轮 Review→Build→Test）
+3. 每步完成 → Review → Build → Test → 再进入下一步               → 已完成（M6.1 → M6.7.1）
+```
 
-R-20 从 HOLD 解除的前置条件（缺一不可）：
-  · M6.6a 实现完成，§12.3.16 的十七条契约逐条可核（§21.1 A31）；
-  · M6.6 完成 HSet 判真 / 启动失败 / signal 生命周期（§12.3.17，A21/A25）；
-  · §21.2 的 B23–B31 全部执行并通过，且不出现 std::terminate / 永久挂起；
-  · 在上述完成前，不得出现 R-20 的 PASS 结论，也不得批准 Final Coding Gate。
+```text
+【当前（M6.8）】下一步只有两件事：
+
+A. 人工最终复审（唯一可解除门禁的动作）
+   · 复审对象：M6.1 → M6.8 的全部提交与本文件 §26 的完成记录；
+   · 复审通过后才由**人工**宣布 Final Coding Gate = PASS；
+   · 本文档不代为批准，也不宣布 Phase 2 整体 COMPLETE（Phase 2 还有其他里程碑）。
+
+B. Phase 3 交接（**不在 M6 内实现**，边界见 §26.9）
+   · 实际 Meeting 协议映射（命令/结果 → wire）；
+   · TCP message ID 与 wire format 设计；
+   · 真实 Response / Notification 字节发送（替换 CountingNoWireCollector 的 Phase 3 wire collector）；
+   · 客户端与服务端协议适配；
+   · 真实端到端测试与 L4 / L5 可观测性。
+```
+
+```text
+R-20 从 HOLD 解除的前置条件（M6.0.8 列出，现行状态逐条核对）：
+  · M6.6a 实现完成，§12.3.16 的十七条契约逐条可核（§21.1 A31）        → 已实现，提交 526b25a / f87245a
+  · M6.6 完成 HSet 判真 / 启动失败 / signal 生命周期（A21/A25）        → 已实现，提交 4d67cca
+  · §21.2 的 B23–B31 全部执行并通过，且不出现 std::terminate / 永久挂起 → 已执行（§26.4）
+  ⇒ 上述三条已满足 ⇒ R-20 记 **IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（§26.6）。
+  ⚠ 但 **Final Coding Gate 仍为 PENDING FINAL HUMAN REVIEW**：
+    R-20 的通过不等于整个 M6 门禁通过，更不等于 Phase 3 可开始实施。
+```
+
+---
+
+## 26. M6 Implementation & Verification Closeout（M6.8）
+
+> 本节是 M6 的**唯一**完成记录（**不**另建第二份"完成规范"）。
+> 它取代 §1.1 / §18 R-20 / §19.12 / §21 / §25 中的"时点状态"表述；那些章节的时间语义
+> 保留为历史，并已在关键处标注"（M6.0.8 时点）"。
+> 本节全部数字与结论来自 **M6.7 / M6.7.1 的实际执行记录**；未取得的日志不作推断，未运行的项不写成 PASS。
+
+### 26.1 状态声明（三个维度，不得合并）
+
+```text
+1. M6 设计                      : COMPLETE
+   （M6.0 → M6.0.8 共九轮，全部已发布；§19 的裁决未被本轮改写）
+
+2. M6 实现与本轮范围内的验证    : COMPLETE
+   （M6.1 / M6.2 / M6.3 / M6.4 / M6.5 / M6.6a / M6.6 / M6.7 / M6.7.1 全部完成并已推送；
+    §26.2 里程碑矩阵；§26.3 构建与测试；§26.4 验收归档）
+
+3. Final Coding Gate            : PENDING FINAL HUMAN REVIEW
+   （本文档是**完成候选**。最终门禁由人工复审后决定。
+    本文档不宣布 Gate = PASS，也不宣布 Phase 2 整体 COMPLETE。）
+```
+
+```text
+允许的声明（本节即采用）：
+  M6 IMPLEMENTATION & VERIFICATION COMPLETE — Final Coding Gate PENDING FINAL HUMAN REVIEW
+不允许的声明（本节明确拒绝）：
+  ✗ Final Coding Gate = PASS
+  ✗ Phase 2 COMPLETE
+  ✗ 客户端已能收到 Meeting Response / Notification
+```
+
+### 26.2 里程碑完成矩阵（M6.1 → M6.8）
+
+| 步 | 实际产出（代码事实） | 提交 | 新增用例 | 状态 |
+| --- | --- | --- | --- | --- |
+| **M6.1** | `MeetingOutboundMessage.h`（typed 值对象）+ `MeetingOutboundChannel.h`（`IMeetingLiveSession` / `IMeetingSessionDirectory` / `IMeetingOutboundMessageCollector`，仅标准库） | `8095134` | 0（纯头文件） | COMPLETE |
+| **M6.2** | `MeetingRequestContextBuilder.h`（纯函数、不读 `_user_uid`）+ 组 1 用例 CB1–CB6 | `72edcb0` | +7 | COMPLETE |
+| **M6.3** | `CServer::FindSessionBySessionId`（`_mutex` 下 find + 复制 `shared_ptr`）+ `CSession` 实现 `IMeetingLiveSession`（仅一个 const 方法）+ 组 2 用例 SL1–SL7 | `16864b1` | +7 | COMPLETE |
+| **M6.4** | `MeetingResponseNotificationAdapter.h/.cpp`（七项 On*、六项 Response 映射、逐目标通知）+ `CountingNoWireCollector.h/.cpp` + 组 3/4/5 用例 | `e08ebb0` | +25 | COMPLETE |
+| **M6.5** | `LogicWorkDispatcher` 注入非拥有 adapter 指针（第四参数默认 `nullptr`）+ **七个调用点**（六 Response + 一 FINALIZE_CLOSE）+ 调用边界异常隔离 + 组 6/7 用例 | `81de31f` | +12 | COMPLETE |
+| **M6.6a** | R-20 RedisMgr 契约（稳定 host/pwd、连接/命令超时、有界 `getConnection()`、AUTH `+OK` 判真、Close 幂等 + 析构 join、12 个获取点处置）+ `RedisConPoolContractTest`；`RedisMgr.h/.cpp` 经授权转为 UTF-8 with BOM | `526b25a` + `f87245a` | +8 | COMPLETE |
+| **M6.6** | `LogicSystem` 四件套一次性装配（collector → adapter → dispatcher → executor）+ 三个生命周期入口 + `ChatServer.cpp` 的 `ShutdownCoordinator` 与阶段 0–10 | `4d67cca` | +8 | COMPLETE |
+| **M6.7** | 全量验证：双配置构建、4 轮 CTest、C++14 门禁、依赖隔离、隔离副本故障注入（B16/B17/B21/B22）、私有 Redis 运行期验证（B24–B27/B31） | 验证轮（无代码提交） | 0 | COMPLETE |
+| **M6.7.1** | 失败退出码修正：`main()` 外层异常分支返回 `EXIT_FAILURE`（+7 行 / −0 行，单文件单 hunk） | `90a3cdd` | 0 | COMPLETE |
+| **M6.8** | 本文件：状态归档、里程碑与验收矩阵、Scope Matrix 审查、Phase 3 交接边界 | 本轮（待人工提交） | 0 | COMPLETE（文档） |
+
+```text
+用例总数推导（可复算）：
+  既有 7 个测试文件 = 13 + 25 + 31 + 127 + 9 + 18 + 1 = **224**（未被修改，见 §26.8）
+  M6 新增           = 8（M6.6a）+ 7（M6.2）+ 7（M6.3）+ 25（M6.4）+ 12（M6.5）+ 8（M6.6）= **67**
+  ⇒ 291 = 224 + 67   （与 ctest 实测总数一致）
+
+⚠ M6.5 的调用点数量更正：现行规范原写"八个调用点"，实际实现为 **七个**
+  （六个 Response + 一个 FINALIZE_CLOSE），因为 Adapter 接口只有七项 On*（§6.4）。
+  调用点与接口一一对应，**不存在**第八个业务回调；§17.1 已按实际实现更正。
+```
+
+### 26.3 构建与测试结果（实际执行记录）
+
+```text
+来源：M6.7 与 M6.7.1 的 Codex 实际执行记录（构建日志 / ctest 日志均在临时目录，未进入仓库）。
+
+配置（Linux, Debug, out-of-tree）
+  cmake -S Server/ChatServer/ChatServer -B <tmp> -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON   → exit 0
+构建
+  cmake --build <tmp> --parallel 4                                                            → exit 0
+  4 个目标全部构建：RedisConPoolContractTest / MeetingResponseNotificationAdapterTest /
+                    ChatServerUnitTests / ChatServer
+  新增告警 0（全量 clean build 仅既有 MysqlDao.cpp:95 一条 [-Wreturn-type]）
+完整 CTest
+  M6.7  第 1 / 2 / 3 轮：291/291 PASS（12.86 s / 13.78 s / 12.87 s；三轮用例集合逐条一致）
+  M6.7.1 第 4 轮      ：291/291 PASS（13.90 s）
+  ⇒ 共 **4 轮完整 CTest，累计 0 失败**
+纯应用构建
+  -DBUILD_TESTING=OFF 配 0 / 构建 0 → Built target ChatServer（不要求 GTest）
+C++14 门禁
+  g++ -std=c++14 -pedantic-errors -Wall -Wextra -fsyntax-only（真实生产 flag）
+  LogicSystem.cpp / ChatServer.cpp / LogicWorkDispatcher.cpp /
+  MeetingResponseNotificationAdapter.cpp / CountingNoWireCollector.cpp → 全部 0 error
+  M6.6 新增代码 0 告警（其余告警均为既有 legacy 头文件）
+既有 flaky
+  LogicWorkQueueTest.cpp:1135 / :681 在 4 轮全量中均 PASS；另做 20 次定向重复 → 20/20 PASS
+  ⚠ 这只是"本轮未观察到"，**不**据此宣称其已永久消除（§20.1 #7/#8 仍为 Deferred）
+```
+
+### 26.4 B16–B31 验收归档矩阵
+
+验证类型代号：**RT** = 实际运行期（真实进程 + 私有 Redis）；**INJ** = 隔离副本故障注入（仓库外）；
+**AUTO** = 自动化单元/契约测试；**STA** = 静态源码核对。
+
+| 项 | 结论 | 类型 | 证据要点 / 与验收定义的差异 |
+| --- | --- | --- | --- |
+| **B16** `run()` 异常后先 reset signals 再 Cleanup | **PASS** | INJ + RT | 注入 `run-throws`：`signals reset → Cleanup` 的顺序标记早于 `step 1a`；随后 1a→5 全部执行；异常被 `throw;` 重抛到外层 `catch`；`tcp_server_ alive, use_count=2` |
+| **B17** 初始化 / 运行失败路径（9 次运行 / 7 类失败点） | **PASS** | INJ + RT | HSet 抛 / HSet false / `BuildAndStart` 抛 / 返回 nullptr / `tcp_server` 构造抛 / `LogicSystem::GetInstance()` 失败（真实首次调用点与阶段 7 两个位置）/ `StartGrpcThread` 失败 / `run()` 抛：均为 exit 0（M6.7.1 前）/ exit 1（M6.7.1 后），无 terminate |
+| **B17b**（"类 A 不被误称已覆盖"门禁） | **NOT VERIFIED** | — | 未构造该变体；Class A 边界见 §26.7.1。**不得**写成 PASS |
+| **B18** `pool->Stop()` 与 `Redis::Close()` 不重复执行 | **PASS** | RT + STA | 隔离副本逐步标记：每次运行 `step 1b`=1、`step 4b`=1、`step 2`=1、`step 5`=1；静态：`pool_->Stop()` 真实调用点 **1** 处（Cleanup 的 1b） |
+| **B19** SIGTERM 后的关闭步骤顺序 | **PASS** | RT（隔离副本临时诊断） | 运行期顺序 `1a → 1b → 2 → 3 → 4a → 4b → 5`（严格递增）**差异**：生产二进制只在失败/跳过时打日志，逐步顺序证据来自隔离副本的临时诊断标记（§4 授权方式），不是生产日志 |
+| **B20** HDel/Close 与 gRPC Shutdown / executor drain 的先后 | **PASS** | RT（同上） | 4a 位于 1a/1b/2 之后、4b 之前；5 最后；`Server destruct listen on port` 出现在 5 之后。**同一差异**：顺序来自隔离副本诊断标记 |
+| **B21** K 级失败必须 fail-stop | **PASS** | INJ（独立子进程） | step 2 注入失败 ⇒ 3 条 `FATAL` + `std::abort()` ⇒ shell 退出状态 **134**；`step 3/4a/4b/5` 执行次数均为 0；无 `normal cleanup done` |
+| **B22** 协调器析构兜底 + drain 期间 TCP Server 存活 | **PASS** | RT | (a) 4 个初始化失败变体由 `~ShutdownCoordinator` 完成 1a–5；(b) `step 2: tcp_server_ alive, use_count=2`；(c) 真实 accept 后线程数 16→17（惰性 executor 启动），SIGTERM 后 `Server destruct` 在 `step 5 end` + `normal cleanup done` **之后** |
+| **B23** 故障注入有界、不构造永久阻塞 | **PASS（合规）** | RT | 所有注入均为有界：启动失败 ≈2.0 s、关闭期失联 ≈1.0 s；无永久挂起用例 |
+| **B24** Redis 正常启动 | **PASS** | RT | `认证成功 ×10` → `HSet … success` → 16380/16381 LISTEN → `logincount_lfh = "0"` |
+| **B25** Redis 不可达 / 认证失败 | **PASS** | RT ×2 | 2013 ms / 2016 ms 有界失败；**端口从未开放**；`HDel skipped (startup registration was never confirmed)`；无 terminate |
+| **B26** 正常 SIGTERM | **PASS** | RT | exit **0**；端口关闭；`logincount_lfh` 被删除；1a–5 各执行一次；无 FATAL。**差异**：线程回收由"正常退出 + 无 abort + 步骤标记完整"推断，无逐步 join 日志 |
+| **B27** 关闭期 Redis 失联 | **PASS** | RT | HDel 失败 → 中性诊断 → 4b（Close）与 5（join）**继续** → exit 0；关闭耗时 992 ms |
+| **B28** 空池获取超时契约 | **PASS** | AUTO | `RedisConPoolContract.EmptyPoolAcquireTimesOut`(2.00 s)、`CloseWakesBlockedAcquire`(1.00 s) |
+| **B29** PING / 重连 / Close 有界 | **PASS** | AUTO | 8/8：`NormalAuthAcquireHandoffAndPing`、`AuthSilentFailsByTimeoutWithoutNullDeref`(3.03 s)、`CommandTimeoutDiscardsConnection`(4.00 s)、`CloseIsIdempotentAndDestructorJoins`、`ReturnAfterCloseReleasesConnection`、`UnexpectedAuthReplyIsRejected`（+B28 两条） |
+| **B30** 双配置构建 + 全量测试 + C++14 门禁 | **PASS** | 构建 / AUTO | 见 §26.3 |
+| **B31** 有限负载压力 | **PASS** | RT | 50 次 connect/close（含半帧发送）**0 失败**；线程 16→17 无增长；51 次 `~CSession destruct`；SIGTERM 后 drain 934 ms、exit 0、端口关闭 |
+
+```text
+必须同时成立的语义约束（M6.8 复核，未被任何一步放宽）：
+  ✓ 启动失败**不开放服务**：Redis 失败路径上 gRPC/TCP 端口从未监听（B25 实测）。
+  ✓ **Redis 启动硬依赖未放宽**：HSet 判真失败 ⇒ 抛启动失败，不进入 BuildAndStart / TCP 构造（D-R20-01）。
+  ✓ **HSet 返回 false 表示"成功未确认"，不表示"一定未写入"**：命令 I/O 超时后 Redis 可能已写入；
+    因此"跳过 4a"可能残留一个实际已写入的 field（§26.6.3）。
+  ✓ **HDel 仍是有业务语义的 bounded best-effort**（D-R20-02）：StatusServer 用该 hash 计数选路；
+    失败允许残留，但只输出**中性**诊断，不断言字段一定不存在。
+  ✓ **HDel 失败后继续 Redis Close 与 gRPC join**（B27 实测）。
+  ✓ **正常关闭按既定顺序 drain**：1a → 1b → 2（executor drain）→ 3 → 4a → 4b → 5。
+  ✗ **不承诺**任意 OS / DNS / 线程永久故障下绝对有界（§26.6.2）。
+```
+
+### 26.5 M6.7.1：失败退出码修正（唯一的生产代码变更）
+
+```text
+问题（人工复审发现）：main() 外层 catch 打印异常后仍落到 return 0
+  ⇒ "拒绝启动"与"run() 抛异常"被操作系统报告为成功退出。
+
+修正：在 main() 的外层异常分支末尾返回 EXIT_FAILURE（+7 行 / −0 行，单文件单 hunk）。
+  未改：Cleanup 顺序、K/B 分级、HDel 语义、信号处理、FailStop()、逐步成功日志。
+```
+
+| 场景 | 修复前（M6.7 实测） | 修复后（M6.7.1 实测） |
+| --- | --- | --- |
+| 正常启动 + SIGTERM | 0 | **0**（保持） |
+| Redis 不可达 | 0（错误） | **1** |
+| Redis 认证失败 | 0（错误） | **1** |
+| HSet 返回 false（环境其余健康，注入） | 0（错误） | **1** |
+| `io_context.run()` 抛异常 | 0（错误） | **1** |
+| K 级失败（fail-stop） | 134（SIGABRT） | **134（SIGABRT，未变）** |
+
+```text
+静态核对：main() 内 `return 0;` 恰好 1 处（正常路径）、`return EXIT_FAILURE;` 恰好 1 处（异常路径）。
+编译期：<cstdlib> 已在既有 include 中，未新增 include；C++14 门禁 0 error。
+注意：`std::abort()` 是信号终止，其退出状态（134）与 return 值无关，不受本次修正影响。
+```
+
+### 26.6 R-20 最终状态与适用条件
+
+#### 26.6.1 状态
+
+```text
+IMPLEMENTED / VERIFIED / PASS (within documented fault model)
+
+四个裁决**未被改写**（§19.12）：
+  D-R20-01  Redis 是启动硬依赖（HSet 判真，失败即拒绝开放服务）
+  D-R20-02  保留 HDel（有业务语义的 bounded best-effort，允许残留但必须如实记录）
+  D-R20-03  仅授权 ChatServer 的 RedisMgr.h/.cpp（未统一重构其他服务）
+  D-R20-04  正常条件下优雅关闭；Redis 故障受超时约束；不承诺绝对有界
+
+落地与验证：
+  · 实现：`526b25a`（池契约 + UTF-8）+ `f87245a`（AUTH 要求显式 +OK）+ `4d67cca`（启动硬依赖 / 信号生命周期）
+  · 契约测试：8/8（B28 / B29）
+  · 运行期：Redis 正常 / 不可达 / 认证失败 / 关闭期失联（B24 / B25 / B27 / B31）
+```
+
+#### 26.6.2 适用条件（PASS 的有效范围）
+
+```text
+在本项目声明的条件下（Redis 正常 / Redis 不可达 / 空池 / 接受连接但不应答，
+且 §12.3.16.1 的超时参数生效）：
+  ✓ 启动：Redis 调用在有限时间内返回；失败 ⇒ 拒绝开放服务
+  ✓ 关闭：HDel 在有限时间内返回；失败 ⇒ 继续 4b / 5
+  ✓ Close：能唤醒等待者并 join 健康检查线程
+
+**不在**保证范围内（不得声称）：
+  ✗ 任意操作系统故障、内核/驱动级永久阻塞
+  ✗ 任意底层线程永久卡死（例如被外部调试器挂起）
+  ✗ 所有 DNS 故障（`redisConnectWithTimeout` 不约束 `getaddrinfo`）
+  ✗ 单次超时等于整个启动/退出过程的总超时
+  ✗ "进程在固定时间内完成优雅关闭"这一无条件命题
+  ✗ Class A（单例构造期内部异常）的安全性（§26.7.1）
+```
+
+#### 26.6.3 该 PASS **不**代表什么
+
+```text
+✗ 不代表 Redis 已具备生产级高可用（无主从 / 哨兵 / 集群 / 持久化策略变更）
+✗ 不代表 ChatServer 实现了通用故障恢复（无重试框架 / 无熔断 / 无自愈）
+✗ 不代表 Class A 构造期内部异常已被覆盖
+✗ 不代表"任意故障下进程都有界退出"
+✗ 不代表 HSet false 时 Redis 一定没有写入（可能已写入；跳过 4a 可能残留 field）
+```
+
+### 26.7 必须保留的边界（不得被本轮"完成"吸收）
+
+#### 26.7.1 B17b / Class A —— `NOT VERIFIED / DOCUMENTED LIMITATION`
+
+```text
+状态：**NOT VERIFIED / DOCUMENTED LIMITATION**（不修、不声称、不写成 PASS）
+
+边界（§12.3.12.3，四情形必须分开）：
+  A-i   构造期、任何线程启动之前抛        → 无线程 ⇒ 不 terminate；协调器无需介入
+  A-ii  部分线程已启动后 std::thread 构造失败 → 对象未诞生 ⇒ joinable 线程随成员销毁 ⇒ std::terminate；
+        协调器**没有运行机会**
+  A-iii 对象构造完成但 shared_ptr 控制块分配失败 → 析构不 join ⇒ std::terminate；
+        协调器**没有运行机会**
+  A-iv  已成功返回并登记                 → 属类 B ⇒ 协调器覆盖
+
+本轮**未**修改 Singleton / AsioIOServicePool / RedisMgr 去构造新的注入点。
+M6.7 的 `logic-getinstance` 注入是"从调用方视角让 GetInstance() 抛异常"（首调用点在阶段 6 的
+CSession 构造函数内），对应 **A-i 形态**；它**不能**被当作"A-ii / A-iii 已验证"。
+⇒ B17b 继续 **NOT VERIFIED**；范围内不包含任何构造期 joinable 残留的安全保证。
+```
+
+#### 26.7.2 Windows / R6
+
+```text
+Windows Debug|x64 = **NOT VERIFIED**（本轮只在 Linux/WSL 执行）
+R6                = **DEFERRED → 独立任务**
+不得以 Linux 编译/测试通过推断 Windows 通过；也不得声称 .sln/.vcxproj 已同步（它们零修改）。
+```
+
+#### 26.7.3 真实字节交付（Phase 3）
+
+```text
+M6 的生产 collector（CountingNoWireCollector）**只计数，不发送任何 Meeting 字节**。
+因此下列说法一律**不成立**，本文档不作任何此类声称：
+  ✗ 客户端已经收到 Meeting Response
+  ✗ Meeting Notification 已通过 TCP 送达
+  ✗ 已实现 TCP message ID 或任何协议序列化
+  ✗ 已验证 L4（异步写失败）/ L5（客户端送达）级别的实际送达
+上述工作全部属于 **Phase 3**（§26.9）。
+```
+
+#### 26.7.4 既有技术债（范围决定不变）
+
+```text
+· CServer::ClearSession 前段的 find 未持 _mutex（R-2）：**未修**（既有并发风险保留）。
+  因此**不得**声称 CServer 的 Session registry 在所有并发交错下无竞态。
+· CSession::_user_uid 构造未初始化：M6 **不读**它（identity 只来自服务端已验证的 uid）。
+· Redis 故障下可能残留 StatusServer 路由 field（启动未确认时跳过 4a）：允许，但必须如实记录。
+· 既有 flaky #1/#2（LogicWorkQueueTest.cpp:1135 / :681）：**未修**；
+  本轮 4 轮全量 + 20 次定向重复均通过，但**不**据此认定已永久消除。
+· Windows R6 未验证；Meeting wire adapter 未实现。
+· 本轮**不**扩展生产代码修复范围（这些问题需要各自独立的任务与授权）。
+```
+
+### 26.8 Scope Matrix 审查（对照 §15）
+
+统计口径：`git diff --numstat 1ac8bed..HEAD`（`1ac8bed` = M6.0.8 的纯文档提交，即实施前的最后状态）。
+
+| 文件 | +/− | 落入 §15 的哪一条 | 授权状态 |
+| --- | --- | --- | --- |
+| `MeetingOutboundMessage.h`（新增） | +87 | §15.1 M6.1 | 已授权 |
+| `MeetingOutboundChannel.h`（新增） | +73 | §15.1 M6.1 | 已授权 |
+| `MeetingRequestContextBuilder.h`（新增） | +43 | §15.1 M6.2 | 已授权 |
+| `MeetingResponseNotificationAdapter.h/.cpp`（新增） | +160 / +477 | §15.1 M6.4 | 已授权 |
+| `CountingNoWireCollector.h/.cpp`（新增） | +74 / +50 | §15.1 M6.4 | 已授权 |
+| `CServer.h/.cpp` | +22/−1 / +30 | §15.1 M6.3 | 已授权 |
+| `CSession.h/.cpp` | +17/−1 / +14 | §15.1 M6.3 | 已授权 |
+| `LogicWorkDispatcher.h/.cpp` | +38/−1 / +101/−2 | §15.1 M6.5 | 已授权 |
+| `LogicSystem.h/.cpp` | +88/−3 / +91/−4 | §15.1 M6.6 | 已授权 |
+| `ChatServer.cpp` | +333/−26 | §15.1 M6.6；**M6.7.1 再 +7/−0（仅退出码）** | 已授权 |
+| `RedisMgr.h/.cpp` | +154/−146 / +19/−25 | §15.1 M6.6a（D-R20-03） | 已授权（**含 GBK → UTF-8 with BOM 转码**，§22.2） |
+| `CMakeLists.txt`（根） | +6 | §15.1（新增 TU 到 `CHATSERVER_APPLICATION_SOURCES`） | 已授权 |
+| `tests/CMakeLists.txt` | +96 | §15.1（新增测试 target / TU） | 已授权 |
+| `tests/MeetingResponseNotificationAdapterTest.cpp`（新增） | +3467 | §15.1 M6.2–M6.6 | 已授权 |
+| `tests/RedisConPoolContractTest.cpp`（新增） | +521 | §15.1 M6.6a | 已授权 |
+| `docs/phase2/M6-response-notification-adapter.md` | +7/−2（实施期）+ 本轮 M6.8 | D1（文档类） | 已授权 |
+
+```text
+逐条核对 §15.3 MUST NOT MODIFY（全部零改动，已由 git 实测）：
+  ✓ docs/phase1/**                                    0 文件改动
+  ✓ Server/ChatServer/ChatServer/meeting/**           0 文件改动（MeetingDomain 仍零依赖）
+  ✓ 既有 7 个测试文件                                 0 文件改动（224 项语义未变）
+  ✓ message.proto / *.sln / *.vcxproj / *.props / *.filters / MyChat_Qt/   0 文件改动
+  ✓ Server/ChatServer2/**、GateServer/**、StatusServer/**、VerifyServer/**  0 文件改动
+    （⇒ 其他服务的 RedisMgr 副本未被触碰；D-R20-03 的"不统一重构"被遵守）
+  ✓ AsioIOServicePool.h/.cpp（GBK）                   0 文件改动
+
+其余结构约束（M6.7 静态核对，§26.3 同一次执行）：
+  ✓ 未引入第二条 FIFO / 第二个消费者：`LogicWorkQueue queue_` 1 处、`std::thread worker_` 1 处
+  ✓ 未新增 Meeting TCP 协议号：`MeetingOutboundMessage.h` 无任何 short/int 协议号字段；
+    M6 路径不调用 `CSession::Send`（生产 collector 不发送）
+  ✓ 未新增真实 Meeting 字节发送路径
+  ✓ 未引入额外第三方依赖：根 CMake 仅新增 2 个源文件；测试 target 仍链接 GTest + MeetingDomain
+    （RedisConPoolContractTest 另用既有的 hiredis / Threads）
+  ✓ M6.7.1 只改 `ChatServer.cpp` 的异常退出码（1 文件 / 1 hunk / +7 行）
+
+偏离结论：**未发现未获授权的偏离**。
+  · 唯一超出"原 §15.1 字面清单"的动作是 `RedisMgr.h/.cpp` 的编码转换（GBK → UTF-8 with BOM），
+    它由 **D-R20-03 + 用户显式授权**覆盖，并已记录于 §2.5 / §19.12 / §22.2。
+  · M6.7 的隔离副本故障注入**不在仓库内**（/tmp），不构成对 Scope Matrix 的偏离；
+    验证后正式工作区零残留（md5 校验 + 注入标记 0 命中）。
+```
+
+### 26.9 Phase 3 交接边界
+
+```text
+M6 交付的是**传输中立的 typed 值对象 + 判活目录 + 逐目标产出**，不是协议实现。
+Phase 3 需要继续的事项（**本轮不实现任何一项**）：
+
+1. 实际 Meeting 协议映射
+   · 六个 Response / 一个 Notification 的字段 → wire 字段；
+   · `ResultCode` / `ResultDisposition` / `MeetingState` 等的**编码值**必须先经契约裁决
+     （M6 刻意不定义任何协议号，§7.2）。
+2. TCP message ID 与 wire format 设计
+   · 新命令/响应的 msg_id 分配（当前 `LogicWorkItem` 与 M6 出站对象均**不含**协议号）；
+   · Frame 版本、长度前缀、分片与背压策略。
+3. 真实 Response / Notification 字节发送
+   · 以 Phase 3 的 wire collector（或 transformer）替换 `CountingNoWireCollector`；
+   · 仍**不得**让 adapter 直接调用 `CSession::Send`（依赖方向不变，§5.3）。
+4. 客户端与服务端协议适配
+   · MyChat_Qt 侧命令构造、响应渲染、通知展示；
+   · 端到端 request_id 关联与幂等语义（request_id 仍**不是**幂等键）。
+5. 真实端到端测试与 L4 / L5 可观测性
+   · Layer D 真实 TCP 端到端（M6 明确 Deferred）；
+   · L4：`HandleWrite` 的异步写失败需要回传通道（M6 未改 `Send` 语义）；
+   · L5：客户端送达需要协议层 ACK（M6 无 ACK / retry / 死信）。
+
+Phase 2 状态声明（防止误读）：
+  ✗ 不得因 M6 完成而宣称 **Phase 2 整体 COMPLETE** —— Phase 2 还有其他已规划里程碑，
+    其状态以各自文档为准。本节只声明 M6 这一里程碑的完成候选状态。
+```
+
+### 26.10 文档一致性检查（本轮实际核对）
+
+```text
+1. 文首状态行                      ：已更新为三维度状态（§26.1 同步）；旧 "Coding NOT STARTED" 标注为 M6.0.8 时点历史
+2. §1.1 里程碑状态                 ：已更新并保留历史行（标注〔历史〕）
+3. §1.2 / §1.3 的 R-20 叙述        ：保留原时间语义，新增当前状态指引（§26.6）
+4. §17.1 实施计划                  ：M6.5 由"八个"更正为"七个调用点"；新增 M6.7.1 行；增加执行状态块
+5. §18 R-20 风险                   ：新增当前状态块与"验收缺口关闭记录"，历史原文保留
+6. §19.12 R-20 裁决                ：四项裁决未改写；新增"当前状态"块，历史块标注〔M6.0.8 时点〕
+7. §20.2 验证边界                  ：(a)(g)(i) 按实际结果更新；(f) 排除项保持不变；(b)(c)(d)(e)(h) 不变
+8. §21.3 / §21.4 验收              ：新增 C1–C7、D1–D4 的实际归档结果
+9. §22 Windows / 编码              ：Windows 仍 NOT VERIFIED；新增 Linux 门禁实测与编码处理归档
+10. §24 历史 Git / 工作区状态      ：保留 §24.1–§24.5 历史；新增 §24.6（M6.8 基线）；判定规则不变
+11. §25 下一步                     ：改为"人工最终复审 + Phase 3 交接"；R-20 前置条件逐条标注已满足
+12. §26（本节）                    ：唯一完成记录；不含"Gate = PASS"或"Phase 2 COMPLETE"的声明
+
+冲突扫描：文档中已无"当前状态 = Coding NOT STARTED / Gate HOLD / R-20 NOT STARTED"的现行表述；
+         所有保留的此类文本均带〔M6.0.8 时点〕或"历史"标记。
+```
+
+### 26.11 提交命令（由用户手动执行；本轮未执行任何 git 写操作）
+
+```bash
+cd /home/tobeki/projects/rtc-signaling-platform
+
+# 提交前复核
+git status --short
+git diff --check
+git diff --stat
+git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
+
+# 显式逐项 add（不使用 git add -A）
+git add docs/phase2/M6-response-notification-adapter.md
+git diff --cached --stat
+git --no-pager diff --cached --stat
+
+# 提交与推送
+git commit -m "docs(phase2): close out M6 implementation and verification status"
+git push origin dev
+
+# 推送后校验
+git log --oneline -1
+git status -sb
+git rev-parse HEAD origin/dev
 ```
