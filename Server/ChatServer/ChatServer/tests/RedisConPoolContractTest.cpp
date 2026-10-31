@@ -23,11 +23,23 @@
 //   8. a non-"+OK" AUTH reply (e.g. a valid RESP integer) is rejected and the
 //      failed connection never enters the pool.
 //
+// M6.7.2 addition - direct, runtime-only evidence for the 60 s health cycle
+// (B29). These cases do NOT shorten the production period and do NOT reach into
+// private state; they wait for events that the real health thread produces:
+//   9.  HC1 HealthThreadPeriodicPingSucceeds
+//         the real check thread PINGs on its own cycle, the peer answers +PONG,
+//         and the pooled connection stays usable;
+//   10. HC2 DiscardedConnectionReauthenticatedByHealthThread
+//         a connection discarded through the production API is replaced by the
+//         health thread's reconnect (a second, real AUTH) and works again;
+//   11. HC3 CloseDuringSilentHealthPingIsBounded
+//         Close() still joins the health thread while that thread is blocked on
+//         a PING the peer deliberately never answers (released by the hiredis
+//         I/O timeout, not by a reply).
+// Each case waits ~60 s of wall clock on purpose: the 60 s period is the
+// behaviour under test. Bounds are generous and only prevent a hang.
+//
 // Not covered here (see the M6.6a completion report):
-//   * the 60-second health-check / reconnect cycle and its stop check: the
-//     threshold is a private constant and waiting 60 s in a unit test is not
-//     acceptable, so that path is verified by static review and by the later
-//     ChatServer runtime smoke (M6.6/M6.7);
 //   * RedisMgr's HSet/HDel wrappers: they need ConfigMgr + config.ini, so their
 //     call-site behaviour is covered by the ChatServer runtime tests instead.
 
@@ -46,9 +58,11 @@
 #include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -62,6 +76,158 @@ long long ElapsedMs(Clock::time_point start) {
                Clock::now() - start)
         .count();
 }
+
+// Budgets for the real 60 s health-check cycle. The production period is the
+// behaviour under test, so nothing here shortens it; the bounds only keep a
+// broken build from hanging the suite.
+const int kHealthWaitMs = 90000;  // first check runs ~59-60 s after construction
+const int kCloseBudgetMs = 8000;  // 2 s command I/O timeout + tick + join slack
+
+// Thread-safe observation of what the peer actually parsed on the wire.
+//
+// Requirements this type exists for:
+//   * every counter is incremented from the peer's real RESP parsing path, so a
+//     TCP accept can never be mistaken for a successful AUTH or a PING;
+//   * waits use steady_clock + a predicate (spurious wakeups cannot end them
+//     early) and always have an explicit deadline;
+//   * it is held through std::shared_ptr, so the peer's detached handler threads
+//     keep the state alive and never touch a destroyed FakeRedisPeer.
+class PeerEvents {
+public:
+    struct Snapshot {
+        int accepted = 0;
+        int auth_requests = 0;
+        int auth_ok_replies = 0;
+        int ping_requests = 0;
+        int pong_replies = 0;
+        int silenced_pings = 0;  // parsed PING deliberately left unanswered
+        int closed = 0;
+    };
+
+    void RecordAccepted() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.accepted;
+        }
+        condition_.notify_all();
+    }
+
+    void RecordAuthRequest() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.auth_requests;
+        }
+        condition_.notify_all();
+    }
+
+    void RecordAuthOkReply() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.auth_ok_replies;
+        }
+        condition_.notify_all();
+    }
+
+    void RecordPingRequest() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.ping_requests;
+        }
+        condition_.notify_all();
+    }
+
+    void RecordPongReply() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.pong_replies;
+        }
+        condition_.notify_all();
+    }
+
+    // A PING that will never be answered. Besides counting it, remember when it
+    // arrived: the Close-overlap proof is (Close return time - this instant).
+    void RecordSilencedPing() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.silenced_pings;
+            silenced_ping_at_ = Clock::now();
+        }
+        condition_.notify_all();
+    }
+
+    void RecordClosed() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++counts_.closed;
+        }
+        condition_.notify_all();
+    }
+
+    Snapshot Get() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return counts_;
+    }
+
+    bool TryGetSilencedPingTime(Clock::time_point& out) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (counts_.silenced_pings == 0) {
+            return false;
+        }
+        out = silenced_ping_at_;
+        return true;
+    }
+
+    bool WaitForAuthRequests(int expected, int timeout_ms) const {
+        return WaitUntil(timeout_ms, [this, expected]() {
+            return counts_.auth_requests >= expected;
+        });
+    }
+
+    bool WaitForAuthOkReplies(int expected, int timeout_ms) const {
+        return WaitUntil(timeout_ms, [this, expected]() {
+            return counts_.auth_ok_replies >= expected;
+        });
+    }
+
+    bool WaitForPingRequests(int expected, int timeout_ms) const {
+        return WaitUntil(timeout_ms, [this, expected]() {
+            return counts_.ping_requests >= expected;
+        });
+    }
+
+    bool WaitForPongReplies(int expected, int timeout_ms) const {
+        return WaitUntil(timeout_ms, [this, expected]() {
+            return counts_.pong_replies >= expected;
+        });
+    }
+
+    bool WaitForSilencedPings(int expected, int timeout_ms) const {
+        return WaitUntil(timeout_ms, [this, expected]() {
+            return counts_.silenced_pings >= expected;
+        });
+    }
+
+    bool WaitForClosedConnections(int expected, int timeout_ms) const {
+        return WaitUntil(timeout_ms, [this, expected]() {
+            return counts_.closed >= expected;
+        });
+    }
+
+private:
+    template <typename Predicate>
+    bool WaitUntil(int timeout_ms, Predicate predicate) const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_until(
+            lock,
+            Clock::now() + std::chrono::milliseconds(timeout_ms),
+            predicate);
+    }
+
+    mutable std::mutex mutex_;
+    mutable std::condition_variable condition_;
+    Snapshot counts_;
+    Clock::time_point silenced_ping_at_ = Clock::time_point();
+};
 
 bool ReadExact(int fd, char* data, size_t len) {
     size_t offset = 0;
@@ -190,7 +356,11 @@ public:
         kNormal,             // AUTH -> +OK, PING -> +PONG, others -> +OK
         kSilentAfterAccept,  // never answer AUTH
         kSilentAfterAuth,    // answer AUTH, then never answer again
-        kUnexpectedAuthReply // AUTH -> :1 (valid RESP, but not a +OK status)
+        kUnexpectedAuthReply,// AUTH -> :1 (valid RESP, but not a +OK status)
+        kSilenceOnHealthPing // AUTH -> +OK; every PING is parsed, recorded and
+                             // deliberately left unanswered while the socket
+                             // stays open, so the client is released only by its
+                             // own command I/O timeout (never by a reply or EOF)
     };
 
     explicit FakeRedisPeer(Mode mode) : mode_(mode) {}
@@ -253,9 +423,14 @@ public:
     int port() const { return port_; }
     int active_connections() const { return active_->load(); }
 
+    // Shared event state: the detached handler threads keep their own strong
+    // reference, so reading it later can never touch a destroyed peer.
+    std::shared_ptr<PeerEvents> events() const { return events_; }
+
 private:
     static void Serve(int fd, Mode mode,
-                      std::shared_ptr<std::atomic<int>> active) {
+                      std::shared_ptr<std::atomic<int>> active,
+                      std::shared_ptr<PeerEvents> events) {
         if (mode == Mode::kSilentAfterAccept) {
             DrainUntilClosed(fd);
         } else {
@@ -266,6 +441,7 @@ private:
                 }
                 const std::string command = Upper(args[0]);
                 if (command == "AUTH") {
+                    events->RecordAuthRequest();
                     if (mode == Mode::kUnexpectedAuthReply) {
                         // Valid RESP integer reply, but not "+OK": a correct
                         // client must reject it instead of treating it as
@@ -276,18 +452,28 @@ private:
                     // kSilentAfterAuth: answer AUTH successfully, then go silent
                     // so later commands hit the command I/O timeout.
                     SendAll(fd, "+OK\r\n");
+                    events->RecordAuthOkReply();
                     if (mode == Mode::kSilentAfterAuth) {
                         DrainUntilClosed(fd);
                         break;
                     }
                 } else if (command == "PING") {
+                    events->RecordPingRequest();
+                    if (mode == Mode::kSilenceOnHealthPing) {
+                        // Keep the socket open and send nothing: the peer proves
+                        // it saw a complete PING, and the client must time out.
+                        events->RecordSilencedPing();
+                        continue;
+                    }
                     SendAll(fd, "+PONG\r\n");
+                    events->RecordPongReply();
                 } else {
                     SendAll(fd, "+OK\r\n");
                 }
             }
         }
         ::close(fd);
+        events->RecordClosed();
         active->fetch_sub(1);
     }
 
@@ -298,12 +484,16 @@ private:
                 return;
             }
             active_->fetch_add(1);
+            events_->RecordAccepted();
             const Mode mode = mode_;
             std::shared_ptr<std::atomic<int>> active = active_;
+            std::shared_ptr<PeerEvents> events = events_;
             // Detached on purpose: the handler owns only the fd plus value
-            // copies, so it never touches this object after the peer is gone.
-            std::thread([fd, mode, active]() { Serve(fd, mode, active); })
-                .detach();
+            // copies (including a strong reference to the shared event state),
+            // so it never touches this object after the peer is gone.
+            std::thread([fd, mode, active, events]() {
+                Serve(fd, mode, active, events);
+            }).detach();
         }
     }
 
@@ -311,6 +501,7 @@ private:
     std::atomic<bool> stop_{false};
     std::shared_ptr<std::atomic<int>> active_ =
         std::make_shared<std::atomic<int>>(0);
+    std::shared_ptr<PeerEvents> events_ = std::make_shared<PeerEvents>();
     int listen_fd_ = -1;
     int port_ = 0;
     std::thread accept_thread_;
@@ -327,6 +518,22 @@ bool WaitForActiveConnections(FakeRedisPeer& peer, int expected,
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return peer.active_connections() == expected;
+}
+
+// Bounded retry around the production getConnection().
+//
+// The health thread hands the connection back *after* the peer has already
+// observed the AUTH/PONG, so "event seen" does not imply "already pooled". This
+// keeps retrying within an explicit budget instead of assuming the handoff.
+redisContext* AcquireWithin(RedisConPool& pool, int timeout_ms) {
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (Clock::now() < deadline) {
+        redisContext* context = pool.getConnection();  // itself bounded (1 s)
+        if (context != nullptr) {
+            return context;
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -518,4 +725,174 @@ TEST(RedisConPoolContract, UnexpectedAuthReplyIsRejected) {
     // The pool must still close normally.
     EXPECT_NO_THROW(pool.Close());
     SUCCEED();
+}
+
+// 9. HC1 (M6.7.2 / B29): the real 60 s health thread must PING on its own and
+//    the pooled connection must stay usable afterwards.
+//
+// Attribution: this test sends no command at all before the PING is observed, so
+// the observed PING can only have come from the production health thread. The
+// wait is on the +PONG reply (which the peer records after really sending it),
+// so no snapshot race can turn a pending reply into a false failure.
+TEST(RedisConPoolContract, HealthThreadPeriodicPingSucceeds) {
+    FakeRedisPeer peer(FakeRedisPeer::Mode::kNormal);
+    ASSERT_TRUE(peer.Start());
+    const std::shared_ptr<PeerEvents> events = peer.events();
+
+    const auto pool_start = Clock::now();
+    RedisConPool pool(1, "127.0.0.1", peer.port(), "secret");
+
+    // Construction authenticates exactly one pooled connection.
+    ASSERT_TRUE(events->WaitForAuthOkReplies(1, kHealthWaitMs))
+        << "initial AUTH was not observed";
+
+    // Wait for the health thread's own PING. No test-issued PING exists yet.
+    ASSERT_TRUE(events->WaitForPingRequests(1, kHealthWaitMs))
+        << "health thread did not PING within " << kHealthWaitMs << " ms";
+    ASSERT_TRUE(events->WaitForPongReplies(1, kHealthWaitMs))
+        << "peer did not answer the health PING with +PONG";
+    const long long ping_ms = ElapsedMs(pool_start);
+
+    const PeerEvents::Snapshot after_ping = events->Get();
+    EXPECT_GE(after_ping.ping_requests, 1);
+    EXPECT_GE(after_ping.pong_replies, 1);
+    EXPECT_EQ(after_ping.auth_requests, 1) << "a healthy PING must not reconnect";
+    EXPECT_EQ(after_ping.silenced_pings, 0);
+
+    // The connection survived the health PING and is still handed out.
+    redisContext* context = AcquireWithin(pool, 5000);
+    ASSERT_NE(context, nullptr) << "pool did not hand back the health-checked connection";
+
+    redisReply* reply = static_cast<redisReply*>(redisCommand(context, "PING"));
+    ASSERT_NE(reply, nullptr);
+    EXPECT_EQ(reply->type, REDIS_REPLY_STATUS);
+    ASSERT_NE(reply->str, nullptr);
+    EXPECT_STREQ(reply->str, "PONG");
+    freeReplyObject(reply);
+
+    pool.returnConnection(context);
+
+    EXPECT_NO_THROW(pool.Close());
+    pool.ClearConnections();
+    EXPECT_TRUE(events->WaitForClosedConnections(1, 5000));
+
+    // The health PING can only happen on the production 60 s cycle.
+    EXPECT_GE(ping_ms, 30000) << "health PING arrived far earlier than the 60 s cycle";
+    EXPECT_LE(ping_ms, kHealthWaitMs);
+}
+
+// 10. HC2 (M6.7.2 / B29): a connection discarded through the production API must
+//     be replaced by the health thread's reconnect, including a second real AUTH.
+//
+// The reconnect is triggered only by the production 60 s cycle: the test never
+// calls the private reconnect()/checkThreadPro(), never touches fail_count_ or
+// counter_, and the peer sees two independent TCP connections.
+TEST(RedisConPoolContract, DiscardedConnectionReauthenticatedByHealthThread) {
+    FakeRedisPeer peer(FakeRedisPeer::Mode::kNormal);
+    ASSERT_TRUE(peer.Start());
+    const std::shared_ptr<PeerEvents> events = peer.events();
+
+    RedisConPool pool(1, "127.0.0.1", peer.port(), "secret");
+    ASSERT_TRUE(events->WaitForAuthOkReplies(1, kHealthWaitMs))
+        << "initial AUTH was not observed";
+
+    // Take the only pooled connection, then discard it (I/O-error path).
+    redisContext* first = pool.getConnection();
+    ASSERT_NE(first, nullptr);
+    pool.discardConnection(first);
+
+    // Before the health cycle the pool must offer nothing: the discarded handle
+    // is gone and must never be handed out again as healthy.
+    const auto empty_start = Clock::now();
+    EXPECT_EQ(pool.getConnection(), nullptr);
+    EXPECT_GE(ElapsedMs(empty_start), 800);  // bounded acquire wait is 1 s
+
+    const PeerEvents::Snapshot before_cycle = events->Get();
+    EXPECT_EQ(before_cycle.auth_requests, 1);
+    EXPECT_EQ(before_cycle.ping_requests, 0) << "empty pool means no health PING";
+
+    // The health thread must reconnect on its own cycle: a second real AUTH.
+    ASSERT_TRUE(events->WaitForAuthRequests(2, kHealthWaitMs))
+        << "health thread did not reconnect within " << kHealthWaitMs << " ms";
+    ASSERT_TRUE(events->WaitForAuthOkReplies(2, kHealthWaitMs))
+        << "reconnect AUTH did not receive +OK";
+
+    const PeerEvents::Snapshot after_reconnect = events->Get();
+    EXPECT_EQ(after_reconnect.auth_requests, 2);
+    EXPECT_EQ(after_reconnect.auth_ok_replies, 2);
+    EXPECT_GE(after_reconnect.accepted, 2) << "reconnect must use a new TCP connection";
+    EXPECT_GE(after_reconnect.closed, 1) << "the discarded connection must be closed";
+    EXPECT_EQ(after_reconnect.silenced_pings, 0) << "normal mode never withholds a reply";
+
+    // The reconnected connection must really work.
+    redisContext* second = AcquireWithin(pool, 5000);
+    ASSERT_NE(second, nullptr) << "pool did not recover after the health reconnect";
+
+    redisReply* reply = static_cast<redisReply*>(redisCommand(second, "PING"));
+    ASSERT_NE(reply, nullptr);
+    EXPECT_EQ(reply->type, REDIS_REPLY_STATUS);
+    ASSERT_NE(reply->str, nullptr);
+    EXPECT_STREQ(reply->str, "PONG");
+    freeReplyObject(reply);
+
+    pool.returnConnection(second);
+
+    EXPECT_NO_THROW(pool.Close());
+    pool.ClearConnections();
+    EXPECT_TRUE(events->WaitForClosedConnections(2, 5000));
+}
+
+// 11. HC3 (M6.7.2 / B29): Close() must still join the health thread while that
+//     thread is blocked on a PING the peer deliberately never answers.
+//
+// Overlap proof: the peer records the PING as silenced (and never replies), and
+// the test measures the span from that PING's arrival to Close() returning. The
+// blocked redisCommand can only be released by the hiredis command I/O timeout
+// (~2 s), so that span must be at least ~1.5 s even if this thread is scheduled
+// late. This is a bounded-completion check inside the documented fault model,
+// NOT a claim of boundedness for arbitrary OS/kernel hangs.
+TEST(RedisConPoolContract, CloseDuringSilentHealthPingIsBounded) {
+    FakeRedisPeer peer(FakeRedisPeer::Mode::kSilenceOnHealthPing);
+    ASSERT_TRUE(peer.Start());
+    const std::shared_ptr<PeerEvents> events = peer.events();
+
+    RedisConPool pool(1, "127.0.0.1", peer.port(), "secret");
+    ASSERT_TRUE(events->WaitForAuthOkReplies(1, kHealthWaitMs))
+        << "initial AUTH was not observed";
+
+    // The health thread sends its PING; the peer parses it and stays silent.
+    ASSERT_TRUE(events->WaitForPingRequests(1, kHealthWaitMs))
+        << "health thread did not PING within " << kHealthWaitMs << " ms";
+    ASSERT_TRUE(events->WaitForSilencedPings(1, kHealthWaitMs));
+
+    Clock::time_point ping_at;
+    ASSERT_TRUE(events->TryGetSilencedPingTime(ping_at));
+
+    const PeerEvents::Snapshot before_close = events->Get();
+    EXPECT_EQ(before_close.silenced_pings, 1);
+    EXPECT_EQ(before_close.pong_replies, 0) << "the health PING must stay unanswered";
+    EXPECT_EQ(before_close.auth_requests, 1);
+
+    // Close while that PING is outstanding.
+    const auto close_start = Clock::now();
+    EXPECT_NO_THROW(pool.Close());
+    const long long close_ms = ElapsedMs(close_start);
+    const long long since_ping_ms = ElapsedMs(ping_at);
+
+    // After Close the pool must not hand out connections, and the silent PING
+    // must not have triggered any extra reconnect.
+    EXPECT_EQ(pool.getConnection(), nullptr);
+    const PeerEvents::Snapshot after_close = events->Get();
+    EXPECT_EQ(after_close.auth_requests, 1) << "Close must not trigger reconnects";
+    EXPECT_EQ(after_close.pong_replies, 0);
+
+    EXPECT_LE(close_ms, kCloseBudgetMs) << "Close() did not finish within budget";
+    EXPECT_GE(since_ping_ms, 1500)
+        << "Close did not overlap the blocked PING (it returned before the I/O timeout)";
+
+    // Close() keeps its documented idempotence.
+    EXPECT_NO_THROW(pool.Close());
+
+    pool.ClearConnections();
+    EXPECT_TRUE(events->WaitForClosedConnections(1, 5000));
 }
