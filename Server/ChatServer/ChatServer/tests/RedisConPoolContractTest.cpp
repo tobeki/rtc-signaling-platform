@@ -845,12 +845,19 @@ TEST(RedisConPoolContract, DiscardedConnectionReauthenticatedByHealthThread) {
 // 11. HC3 (M6.7.2 / B29): Close() must still join the health thread while that
 //     thread is blocked on a PING the peer deliberately never answers.
 //
-// Overlap proof: the peer records the PING as silenced (and never replies), and
-// the test measures the span from that PING's arrival to Close() returning. The
-// blocked redisCommand can only be released by the hiredis command I/O timeout
-// (~2 s), so that span must be at least ~1.5 s even if this thread is scheduled
-// late. This is a bounded-completion check inside the documented fault model,
-// NOT a claim of boundedness for arbitrary OS/kernel hangs.
+// Overlap proof (M6.7.2a - three separately measured intervals, because the
+// total span alone is not evidence of overlap: it also grows when the PING has
+// already timed out before Close() is even called):
+//   A  ping_at     -> close_start : Close() must begin while the ~2 s command
+//                                  I/O timeout is still pending (< 1500 ms);
+//   B  close_start -> Close return: Close() must really wait, so it cannot
+//                                  return in a few milliseconds;
+//   C  ping_at     -> Close return: total span, reported for diagnosis only.
+// A structural cross-check backs A up: until the health thread frees the
+// redisContext the peer cannot have observed the socket closing, so "no close
+// observed yet" proves the PING was still blocked at that instant.
+// This is a bounded-completion check inside the documented fault model, NOT a
+// claim of boundedness for arbitrary OS/kernel hangs.
 TEST(RedisConPoolContract, CloseDuringSilentHealthPingIsBounded) {
     FakeRedisPeer peer(FakeRedisPeer::Mode::kSilenceOnHealthPing);
     ASSERT_TRUE(peer.Start());
@@ -873,22 +880,76 @@ TEST(RedisConPoolContract, CloseDuringSilentHealthPingIsBounded) {
     EXPECT_EQ(before_close.pong_replies, 0) << "the health PING must stay unanswered";
     EXPECT_EQ(before_close.auth_requests, 1);
 
-    // Close while that PING is outstanding.
+    // The production window between "the peer parsed the PING" and "hiredis
+    // reports the command I/O timeout" is ~2000 ms. Requiring A below 1500 ms
+    // leaves >=500 ms of margin for WSL scheduling while still proving that the
+    // PING was outstanding when Close() was called.
+    const long long kPendingPingWindowMs = 1500;
+
+    // Interval A: PING arrival -> the instant Close() is invoked.
     const auto close_start = Clock::now();
+    const long long elapsed_before_close_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            close_start - ping_at)
+            .count();
+
+    // Structural cross-check for A: the peer can only observe the socket
+    // closing after the health thread has freed that redisContext, which only
+    // happens after its PING already timed out. "No close observed yet" and
+    // "still a single AUTH" therefore both prove the PING is still blocked.
+    const PeerEvents::Snapshot at_close = events->Get();
+    EXPECT_EQ(at_close.closed, 0)
+        << "the health thread had already dropped its connection before Close() "
+           "started (elapsed_before_close_ms="
+        << elapsed_before_close_ms << ")";
+    EXPECT_EQ(at_close.auth_requests, 1)
+        << "a reconnect before Close() means the PING had already timed out "
+           "(elapsed_before_close_ms="
+        << elapsed_before_close_ms << ")";
+    EXPECT_LT(elapsed_before_close_ms, kPendingPingWindowMs)
+        << "Close() started after the PING may already have timed out "
+           "(elapsed_before_close_ms="
+        << elapsed_before_close_ms << ", window=" << kPendingPingWindowMs
+        << " ms): this run proves NO overlap and must not be reported as PASS";
+
+    // Close while that PING is outstanding.
     EXPECT_NO_THROW(pool.Close());
+
+    // Interval B: how long Close() itself blocked.
     const long long close_ms = ElapsedMs(close_start);
+    // Interval C: total span, reported for diagnosis only (never the proof).
     const long long since_ping_ms = ElapsedMs(ping_at);
+
+    const std::string timing =
+        "elapsed_before_close_ms=" + std::to_string(elapsed_before_close_ms) +
+        " close_ms=" + std::to_string(close_ms) +
+        " since_ping_ms=" + std::to_string(since_ping_ms);
+
+    // Publish the three measurements so a run is auditable afterwards (they
+    // appear in --gtest_output=xml) without adding runtime log noise.
+    RecordProperty("elapsed_before_close_ms",
+                   static_cast<int>(elapsed_before_close_ms));
+    RecordProperty("close_ms", static_cast<int>(close_ms));
+    RecordProperty("since_ping_ms", static_cast<int>(since_ping_ms));
 
     // After Close the pool must not hand out connections, and the silent PING
     // must not have triggered any extra reconnect.
-    EXPECT_EQ(pool.getConnection(), nullptr);
+    EXPECT_EQ(pool.getConnection(), nullptr) << timing;
     const PeerEvents::Snapshot after_close = events->Get();
-    EXPECT_EQ(after_close.auth_requests, 1) << "Close must not trigger reconnects";
-    EXPECT_EQ(after_close.pong_replies, 0);
+    EXPECT_EQ(after_close.auth_requests, 1)
+        << "Close must not trigger reconnects; " << timing;
+    EXPECT_EQ(after_close.pong_replies, 0) << timing;
 
-    EXPECT_LE(close_ms, kCloseBudgetMs) << "Close() did not finish within budget";
-    EXPECT_GE(since_ping_ms, 1500)
-        << "Close did not overlap the blocked PING (it returned before the I/O timeout)";
+    // Interval B lower bound: with A < 1500 ms at least ~500 ms of the 2 s I/O
+    // timeout is still pending, so a Close() that really waits for the health
+    // thread cannot return this quickly. This is what rules out "returned
+    // immediately because nothing was blocked".
+    EXPECT_GE(close_ms, 300)
+        << "Close() did not wait for the blocked PING; " << timing;
+    // Interval B upper bound: 2 s command I/O timeout + one 1 s health tick +
+    // join slack. A budget for the test, not a production SLA.
+    EXPECT_LE(close_ms, kCloseBudgetMs)
+        << "Close() did not finish within budget; " << timing;
 
     // Close() keeps its documented idempotence.
     EXPECT_NO_THROW(pool.Close());
