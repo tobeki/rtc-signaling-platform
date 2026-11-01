@@ -1,17 +1,17 @@
 # Phase 2 - M6：Response / Notification Adapter
 
-> 状态：**M6 IMPLEMENTATION & VERIFICATION COMPLETE — Final Coding Gate PENDING FINAL HUMAN REVIEW**
+> 状态：**M6 IMPLEMENTATION & VERIFICATION COMPLETE — Final Coding Gate PASS**
 >
 > ```text
 > 1. M6 设计                      : COMPLETE
 > 2. M6 实现与本轮范围内的验证    : COMPLETE（M6.1 → M6.7.2a 全部完成并已推送；294/294 测试通过）
-> 3. Final Coding Gate            : PENDING FINAL HUMAN REVIEW（本文档是完成候选，不代为批准）
+> 3. Final Coding Gate            : **PASS**（项目负责人于 2026-11-01 人工批准；
+>                                    依据：M6 Final Coding Gate 最终只读复审报告；记录见 §26.12）
 > ```
 >
-> 收尾轮次：**M6.8.2 — Documentation Accuracy Correction**
->           （主题：**M6 Final Coding Gate 审计发现的文档准确性更正**：C-1 ~ C-6 与
->            F-06/F-07/F-08/F-15/F-13；只改本文件；未修改任何生产代码 / 测试 / CMake；
->            完整完成记录见 **§26**）
+> 收尾轮次：**M6.8.3 — Final Coding Gate Approval Record**
+>           （主题：**记录 2026-11-01 项目负责人人工批准 M6 Final Coding Gate = PASS 的事实**；
+>            只改本文件；未修改任何生产代码 / 测试 / CMake；完整批准记录见 **§26.12**）
 > 历史说明：M6.0 → M6.0.8 共九轮为**设计**修订（当时状态为 `DESIGN COMPLETE / Coding NOT STARTED`）；
 >           该状态是 **M6.0.8 时点**的真实记录，已被 §26 的实现与验证记录取代，不再代表当前状态。
 > Phase 2 M-planning 原始基线：`da19189a55ab13058a22c38c228d3043df72bdf6`（M5.1 收尾）
@@ -22,13 +22,15 @@
 > M6.0.4 发布时的历史基线：`8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**）
 > M6.0.6 发布时的上一轮基线：`a761039ca4162f1016e651a07fca7000b8798c9f`（**已不是当前远端**）
 > 已发布的 M6.0.7 基线：`02447fd507836d3f78bc0be8a24cb225bc91eb48`
-> 本文档当前修订：**M6.8.2 — Documentation Accuracy Correction**（待人工 Review；工作区状态见 §24.8）
-> 历史修订：M6.8.1 — Documentation Closeout Correction（已发布；记录见 §26）；
+> 本文档当前修订：**M6.8.3 — Final Coding Gate Approval Record**（已获人工批准；工作区状态见 §24.9）
+> 历史修订：M6.8.2 — Documentation Accuracy Correction（已发布 `b8fbbba`；记录见 §26）；
+>           M6.8.1 — Documentation Closeout Correction（已发布；记录见 §26）；
 >           M6.8 — Documentation Closeout（已发布；记录见 §26）；
 >           M6.0.8 — R-20 Architecture Decision Incorporation（已发布；记录见 §19.12）
 > R-20：**IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（D-R20-01 ~ D-R20-04 全部落地；§26.6）
 > M6 Coding：**COMPLETE**（M6.1 → M6.7.2a 已实现并已推送；§26.2）
-> Final Coding Gate：**PENDING FINAL HUMAN REVIEW** —— 本文档不宣布 Gate = PASS，也不宣布 Phase 2 整体 COMPLETE
+> Final Coding Gate：**PASS（Human Approved on 2026-11-01）** —— 本批准只针对 M6；
+>                     不宣布 Phase 2 整体 COMPLETE（Phase 2 还有其他里程碑）
 
 ---
 
@@ -47,14 +49,16 @@
 | **M6.0.4 发布时的历史基线** | `8653a695fb4d794e0127224ef3ec60968bb0d916`（**已不是当前远端**，仅用于追溯） |
 | **M6.0.6 发布时的上一轮基线** | `a761039ca4162f1016e651a07fca7000b8798c9f`（**已不是当前远端**） |
 | **已发布的 M6.0.7 基线** | `02447fd507836d3f78bc0be8a24cb225bc91eb48` — `docs(phase2): fix the BuildAndStart signature and record the Redis blocking risk` |
-| 本修订轮次 | **M6.8.2 — Documentation Accuracy Correction**（主题：审计 C-1 ~ C-6 / F-06 / F-07 / F-08 / F-15 / F-13 的文档更正；只改本文件） |
-| 本修订依据 | 独立审计报告（CONDITIONAL PASS）与 M6.1 → M6.7.2a 的实际实现 / 验证记录（§26.2 / §26.3 / §26.4）；对当前 HEAD 的只读复核；**本轮未修改任何代码 / 测试 / CMake**；本轮未执行任何构建或测试 |
+| 本修订轮次 | **M6.8.3 — Final Coding Gate Approval Record**（主题：记录 2026-11-01 项目负责人人工批准 M6 Final Coding Gate = PASS；只改本文件） |
+| 本修订性质 | **纯文档收尾**：只记录已生效的人工批准事实；不修改生产代码 / 测试 / CMake / 架构 |
+| 本修订依据 | M6 Final Coding Gate 最终只读复审报告（建议 PASS）与项目负责人 **2026-11-01** 的正式批准；M6.8.2 发布记录（`b8fbbba`）；对当前 HEAD 的只读复核；**本轮未修改任何代码 / 测试 / CMake**；本轮未执行任何构建或测试 |
+| M6.8.2 发布 | `b8fbbba57eeac6fd64875ef460373aa19630a51b`（父 `e5d0b99`；仅修改本文档；**+226 / −42**） |
 | R-20 设计裁决 | **DECIDED**（四项裁决见 §19.12；方案见 §12.3.15.5 / §12.3.16 / §12.3.17 / §12.3.18）—— 未被本轮改写 |
 | R-20 实现与验证 | **IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（§26.6；适用条件见 §26.6.2） |
 | M6 实现（M6.1 → M6.7.2a） | **COMPLETE**（已实现并已推送；提交清单见 §26.2） |
 | M6 验证 | **COMPLETE（本轮范围内）**：**294/294** 测试通过（7 轮完整 CTest：M6.7 ×3 与 M6.7.1 ×1 为 291/291；M6.7.2 ×2 与 M6.7.2a ×1 为 294/294）；双配置构建通过（ON 有留存构建日志；OFF 为历史记录）；C++14 手工门禁为**历史报告**（日志未留存，CMake 未强制该标准；§26.3） |
-| Final Coding Gate | **PENDING FINAL HUMAN REVIEW**（本文档不代为批准） |
-| 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮（M6.8.2）零修改**（仅文档；历史状态见下表末行，均已过时） |
+| Final Coding Gate | **PASS — Human Approved on 2026-11-01**（批准人：项目负责人；依据：M6 Final Coding Gate 最终只读复审报告；记录见 §26.12） |
+| 生产代码 / 测试代码 / CMake / Phase 1 文档 | **本轮（M6.8.3）零修改**（仅文档；历史状态见下表末行，均已过时） |
 | 〔历史〕M6.0.8 时点状态 | 设计 **DECIDED**；R-20 实现/验证 **NOT STARTED**；M6 Coding **NOT STARTED**；Gate **HOLD**；生产代码零修改 |
 
 ### 1.2 本修订解决的问题
@@ -211,10 +215,10 @@ D-R20-04  关闭完成性目标
 本轮只改本文件（§2.5）：把上述裁决写成一致、可实施的设计基线。
 生产代码 / 测试代码 / CMake / Phase 1 文档零修改；
 〔M6.0.8 时点〕R-20 的实现与验证尚未开始，Final Coding Gate 仍为 HOLD。
-〔当前状态 —— M6.8 更新〕R-20 已实现并验证通过（§26.6）；Final Coding Gate 为 **PENDING FINAL HUMAN REVIEW**（§26.1）。
+〔当前状态 —— M6.8.3 更新〕R-20 已实现并验证通过（§26.6）；M6 Final Coding Gate 已由项目负责人于 **2026-11-01** 批准 **PASS**（§26.12）。
 ```
 
-**M6.8.2（本轮）只做文档准确性更正，不改变任何实现、测试或结论。共十一项：**
+**M6.8.2（已发布）只做文档准确性更正，不改变任何实现、测试或结论。共十一项：**
 
 ```text
 C-1  §22.2 编码：更正 CServer.h 的编码事实（基线 ASCII → 现 UTF-8 无 BOM，仅注释文本；
@@ -233,7 +237,22 @@ F-15 §21.3 C6：区分既有 tracked 配置（MyChat_Qt/config.ini）与 M6 新
 F-13 §12.3.16.4：重新评估"连接池超发"观察 —— 未证明存在超发；给出计数器不变量与前提
 ```
 
-本轮**不**新增验收结论、**不**升级任何 NOT VERIFIED、**不**宣布 Final Coding Gate = PASS。
+本轮（M6.8.2 时点）**不**新增验收结论、**不**升级任何 NOT VERIFIED、**不**宣布 Final Coding Gate = PASS
+（该时点尚未批准；M6.8.3 已于 2026-11-01 获人工批准 PASS，见 §26.12）。
+
+**M6.8.3（本轮）只记录已生效的人工批准事实，不修改任何实现、测试或架构：**
+
+```text
+A. 文首 / §1.1 / §25 / §26.1 的状态更新为 Final Coding Gate = PASS
+   （项目负责人 2026-11-01 批准；依据：M6 Final Coding Gate 最终只读复审报告）。
+B. §26.2 的 M6.8.2 行更正为已发布记录：提交 b8fbbba；仅本文件；+226 / −42。
+C. §26.12 归档 OBS-1 / OBS-2 / OBS-3（均为非阻塞观察，不影响批准）。
+D. §25 明确 Phase 3 交接准备的授权范围：仅技术现状盘点、架构设计、协议契约裁决；
+   Phase 3 生产代码实现仍需独立任务授权。
+```
+
+本轮**不**修改生产代码 / 测试 / CMake / Phase 1 文档；**不**新增验收结论；
+**不**改变 Phase 3 边界（§26.9）。
 
 ### 1.3 提交状态（必须与远端事实一致）
 
@@ -280,7 +299,7 @@ F-13 §12.3.16.4：重新评估"连接池超发"观察 —— 未证明存在超
   它**不**证明 R-20 已修复，也**不**证明 M6 Coding 已获批准：
     · R-20 设计裁决：DECIDED（§19.12）
     · R-20 实现与验证：NOT STARTED（生产代码未动）        ← 历史
-    · Final Coding Gate：HOLD（§21 / §25）                ← 历史；现为 PENDING FINAL HUMAN REVIEW
+    · Final Coding Gate：HOLD（§21 / §25）                ← 历史；M6.8.2 前为 PENDING FINAL HUMAN REVIEW，M6.8.3 起为 PASS（§26.12）
 ```
 
 ### 1.4 本修订对 Phase 1 的地位声明
@@ -4055,11 +4074,11 @@ C1 拒绝；C2 拒绝；C3 单独不充分；C4 采用（作为硬依赖策略�
 · Final Coding Gate：HOLD —— 直到 §21.2 的 B24–B31 全部执行并通过。
 · 不得把"设计已裁决"写成"R-20 已修复"，也不得写成"Coding Gate 已通过"。
 
-〔当前（M6.8 更新，四个裁决本身**未被改写**）〕
+〔当前状态 —— M6.8.3 更新，四个裁决本身**未被改写**〕
 · D-R20-01 ~ D-R20-04 不变，落地范围与验证证据见 §26.6。
 · R-20：IMPLEMENTED / VERIFIED / PASS (within documented fault model)。
 · B24–B31 已全部执行（§26.4）⇒ 上述 HOLD 前置条件已满足；
-  但 Final Coding Gate 仍为 **PENDING FINAL HUMAN REVIEW**（由人工复审决定，§26.1）。
+  M6 Final Coding Gate 已由项目负责人于 **2026-11-01** 批准 **PASS**（§26.12）。
 · 该 PASS **不含** Class A 构造期内部异常与任意 OS / DNS / 内核级永久阻塞。
 ```
 
@@ -4602,6 +4621,7 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 本轮 add/commit/push: **未执行**（本任务明确禁止提交与推送；由用户手动执行，命令见 §26.11）
 本轮生产代码/测试/CMake: 零修改
 本轮状态结论       : M6 实现与验证 COMPLETE；Final Coding Gate **PENDING FINAL HUMAN REVIEW**
+                     〔M6.8 时点快照；M6.8.3 已于 2026-11-01 批准 PASS，见 §26.12〕
 ```
 
 ```text
@@ -4622,9 +4642,10 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 本轮生产代码/测试/CMake/Phase 1: 零修改
 本轮状态结论       : M6 实现与验证 COMPLETE（294/294）；Final Coding Gate
                      **PENDING FINAL HUMAN REVIEW**（未由本轮批准）
+                     〔M6.8.1 时点快照；M6.8.3 已于 2026-11-01 批准 PASS，见 §26.12〕
 ```
 
-### 24.8 M6.8.2 的基线（本轮实测）
+### 24.8 M6.8.2 的基线（当时实测）
 
 ```text
 进入本轮时的状态   : git branch = dev；HEAD = origin/dev =
@@ -4637,6 +4658,24 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 本轮构建/测试      : **未执行**（纯文档任务；不重跑 CMake / ctest / 服务）
 本轮状态结论       : 文档准确性更正完成；M6 实现与验证仍为 COMPLETE（294/294）；
                      Final Coding Gate 仍为 **PENDING FINAL HUMAN REVIEW**（未由本轮批准）
+                     〔M6.8.2 时点快照；M6.8.3 已于 2026-11-01 批准 PASS，见 §26.12〕
+```
+
+### 24.9 M6.8.3 的基线（本轮实测）
+
+```text
+进入本轮时的状态   : git branch = dev；HEAD = origin/dev =
+                     b8fbbba57eeac6fd64875ef460373aa19630a51b（M6.8.2 已发布）；
+                     working tree / index 均 clean；git diff --check 为空；无 untracked 文件
+本轮修改           : 仅 docs/phase2/M6-response-notification-adapter.md
+                     （版本号 M6.8.3；主题：Final Coding Gate 人工批准记录归档）
+本轮 add/commit/push: **未执行**（由用户手动执行，命令见 §26.11）
+本轮生产代码/测试/CMake/Phase 1: 零修改
+本轮构建/测试      : **未执行**（纯文档任务；不重跑 CMake / ctest / 服务）
+本轮状态结论       : M6 Final Coding Gate = **PASS**（项目负责人 2026-11-01 批准）；
+                     Phase 2 整体仍未 COMPLETE；Phase 3 仅获准交接准备（实现需独立授权）
+说明               : §24.6 / §24.7 / §24.8 中的 "PENDING FINAL HUMAN REVIEW" 均为各自时点快照；
+                     M6.8.3 起 Gate 为 PASS（§26.12），历史记录不改写。
 ```
 
 ---
@@ -4651,19 +4690,24 @@ git --no-pager diff -- docs/phase2/M6-response-notification-adapter.md
 ```
 
 ```text
-【当前（M6.8）】下一步只有两件事：
+【当前（M6.8.3，2026-11-01）】
 
-A. 人工最终复审（唯一可解除门禁的动作）
-   · 复审对象：M6.1 → M6.8 的全部提交与本文件 §26 的完成记录；
-   · 复审通过后才由**人工**宣布 Final Coding Gate = PASS；
-   · 本文档不代为批准，也不宣布 Phase 2 整体 COMPLETE（Phase 2 还有其他里程碑）。
+A. M6 Final Coding Gate **已正式批准**
+   · 批准人：项目负责人；批准日期：2026-11-01；
+   · 依据：M6 Final Coding Gate 最终只读复审报告（C-1 ~ C-6 全部关闭；
+     无 BLOCKER / MAJOR；无影响批准的 MINOR）；
+   · 该裁决已生效，不再处于等待批准状态；最终批准记录见 §26.12。
 
-B. Phase 3 交接（**不在 M6 内实现**，边界见 §26.9）
-   · 实际 Meeting 协议映射（命令/结果 → wire）；
-   · TCP message ID 与 wire format 设计；
-   · 真实 Response / Notification 字节发送（替换 CountingNoWireCollector 的 Phase 3 wire collector）；
-   · 客户端与服务端协议适配；
-   · 真实端到端测试与 L4 / L5 可观测性。
+B. M6 最终文档归档（M6.8.3）
+   · 只更新本文件（唯一完成记录）；不修改生产代码 / 测试 / CMake / Phase 1；
+   · 归档内容：批准事实、M6.8.2 发布记录、OBS-1 ~ OBS-3、Phase 3 边界。
+
+C. Phase 2 → Phase 3 交接准备正式启动
+   · 当前授权范围**仅限**：技术现状盘点、架构设计、协议契约裁决；
+   · Phase 3 的生产代码实现、真实字节发送、TCP message ID / wire format、
+     客户端适配与 L4 / L5 验证，均**仍需独立任务授权**；
+   · M6 交付边界不变（§26.9）：typed 出站值对象 + 判活目录 + 逐目标产出，
+     不代表已实现 wire 协议或客户端已收到消息。
 ```
 
 ```text
@@ -4673,8 +4717,9 @@ R-20 从 HOLD 解除的前置条件（M6.0.8 列出，现行状态逐条核对�
   · §21.2 的 B23–B31 已执行，且不出现 std::terminate / 永久挂起 → 已执行（§26.4；
     B23 的证据范围按其四种 false 来源分级，见 §26.4 末「B23 证据澄清」）
   ⇒ 上述三条已满足 ⇒ R-20 记 **IMPLEMENTED / VERIFIED / PASS (within documented fault model)**（§26.6）。
-  ⚠ 但 **Final Coding Gate 仍为 PENDING FINAL HUMAN REVIEW**：
-    R-20 的通过不等于整个 M6 门禁通过，更不等于 Phase 3 可开始实施。
+  ⚠ R-20 的局部 PASS 不等于 M6 门禁自动通过，也不等于 Phase 3 可实现；
+    M6 Final Coding Gate 已由项目负责人于 2026-11-01 单独批准（§26.12），
+    Phase 3 目前仅获准交接准备，生产实现仍需独立任务授权。
 ```
 
 ---
@@ -4685,6 +4730,7 @@ R-20 从 HOLD 解除的前置条件（M6.0.8 列出，现行状态逐条核对�
 > 它取代 §1.1 / §18 R-20 / §19.12 / §21 / §25 中的"时点状态"表述；那些章节的时间语义
 > 保留为历史，并已在关键处标注"（M6.0.8 时点）"。
 > 本节全部数字与结论来自 **M6.7 / M6.7.1 的实际执行记录**；未取得的日志不作推断，未运行的项不写成 PASS。
+> M6.8.3 的人工批准事实来自项目负责人 **2026-11-01** 的正式裁决（§26.12）；历史测试结论仍按原记录口径保留。
 
 ### 26.1 状态声明（三个维度，不得合并）
 
@@ -4697,21 +4743,26 @@ R-20 从 HOLD 解除的前置条件（M6.0.8 列出，现行状态逐条核对�
     全部完成并已推送；**294/294** 测试通过（§26.3）。
     §26.2 里程碑矩阵；§26.3 构建与测试；§26.4 验收归档）
 
-3. Final Coding Gate            : PENDING FINAL HUMAN REVIEW
-   （本文档是**完成候选**。最终门禁由人工复审后决定。
-    本文档不宣布 Gate = PASS，也不宣布 Phase 2 整体 COMPLETE。）
+3. Final Coding Gate            : **PASS**
+   · 批准人：项目负责人
+   · 批准日期：2026-11-01
+   · 批准依据：M6 Final Coding Gate 最终只读复审报告
+     （C-1 ~ C-6 六项正式条件全部关闭；F-06 / F-07 / F-08 / F-13 / F-15 已复核；
+      无 BLOCKER / MAJOR；无影响批准的 MINOR）
+   · 无阻塞性遗留问题；最终批准记录见 §26.12
+   · 本批准只针对 M6；不表示 Phase 2 整体 COMPLETE
 ```
 
 ```text
 允许的声明（本节即采用）：
-  M6 IMPLEMENTATION & VERIFICATION COMPLETE — Final Coding Gate PENDING FINAL HUMAN REVIEW
+  M6 IMPLEMENTATION & VERIFICATION COMPLETE — Final Coding Gate PASS
+  （PASS 由项目负责人于 2026-11-01 人工批准；依据见 §26.12）
 不允许的声明（本节明确拒绝）：
-  ✗ Final Coding Gate = PASS
   ✗ Phase 2 COMPLETE
   ✗ 客户端已能收到 Meeting Response / Notification
 ```
 
-### 26.2 里程碑完成矩阵（M6.1 → M6.8.2）
+### 26.2 里程碑完成矩阵（M6.1 → M6.8.3）
 
 | 步 | 实际产出（代码事实） | 提交 | 新增用例 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -4728,7 +4779,8 @@ R-20 从 HOLD 解除的前置条件（M6.0.8 列出，现行状态逐条核对�
 | **M6.7.2a** | **HC3 证明精度补强**：由"总跨度 ≥1.5 s"改为 A/B/C 三段独立测量（B 下界 300 ms、上界 8000 ms；A < 1500 ms）+ Close 前结构交叉核对（`closed==0`、`auth_requests==1`）+ gtest `RecordProperty` 落 XML。**未改生产代码、未新增用例** | `03d9df5` | **0** | COMPLETE（+1 轮 CTest：294/294，第 7 轮） |
 | **M6.8** | 本文件：状态归档、里程碑与验收矩阵、Scope Matrix 审查、Phase 3 交接边界 | `f1856dd` | 0 | COMPLETE（文档） |
 | **M6.8.1** | 本节补正：M6.7.2 / M6.7.2a 归档、统计修正（291 → 294、+67 → +70）、B29 由旧的「8/8」更新为 11 项完整证据 | `e5d0b99` | 0 | COMPLETE（文档） |
-| **M6.8.2** | 文档准确性更正：C-1 编码事实 / C-2 Redis 用例数 11 / C-3 CTest 轮次归属 / C-4 §21.1 A1·A3·A11·A16 / C-5 B23 证据分级 / C-6 §10.3 Meeting ID 契约；另 F-06 C++14 口径、F-07 Windows-R6 后果、F-08 Class A 精度、F-15 C6 既有配置、F-13 池规模不变量复核 | 本轮（待人工提交） | 0 | COMPLETE（文档） |
+| **M6.8.2** | 文档准确性更正：C-1 编码事实 / C-2 Redis 用例数 11 / C-3 CTest 轮次归属 / C-4 §21.1 A1·A3·A11·A16 / C-5 B23 证据分级 / C-6 §10.3 Meeting ID 契约；另 F-06 C++14 口径、F-07 Windows-R6 后果、F-08 Class A 精度、F-15 C6 既有配置、F-13 池规模不变量复核 | `b8fbbba`（已发布；仅本文档 **+226 / −42**） | 0 | COMPLETE（文档） |
+| **M6.8.3** | Final Coding Gate 人工批准记录：文首 / §1.1 / §25 / §26.1 状态更新为 PASS；§26.2 更正 M6.8.2 发布记录；§26.12 归档 OBS-1 ~ OBS-3；§25 明确 Phase 3 交接准备授权范围（仅盘点 / 设计 / 契约裁决） | 本轮（待人工提交） | 0 | COMPLETE（文档） |
 
 ```text
 用例总数推导（可复算）：
@@ -5083,7 +5135,7 @@ M6 的生产 collector（CountingNoWireCollector）**只计数，不发送任何
 | `tests/CMakeLists.txt` | +96 | §15.1（新增测试 target / TU） | 已授权 |
 | `tests/MeetingResponseNotificationAdapterTest.cpp`（新增） | +3467 | §15.1 M6.2–M6.6 | 已授权 |
 | `tests/RedisConPoolContractTest.cpp`（新增） | +959（M6.6a 8 例 + M6.7.2 3 例与观测设施；M6.7.2a 仅改 HC3） | §15.1 M6.6a；M6.7.2 / M6.7.2a 为测试内扩展 | 已授权 |
-| `docs/phase2/M6-response-notification-adapter.md` | +7/−2（实施期）+ M6.8（+545/−35）+ M6.8.1 + M6.8.2（本轮） | D1（文档类） | 已授权 |
+| `docs/phase2/M6-response-notification-adapter.md` | +7/−2（实施期）+ M6.8（+545/−35）+ M6.8.1 + M6.8.2（已发布）+ M6.8.3（本轮） | D1（文档类） | 已授权 |
 
 ```text
 逐条核对 §15.3 MUST NOT MODIFY（全部零改动，已由 git 实测）：
@@ -5141,7 +5193,8 @@ Phase 3 需要继续的事项（**本轮不实现任何一项**）：
 
 Phase 2 状态声明（防止误读）：
   ✗ 不得因 M6 完成而宣称 **Phase 2 整体 COMPLETE** —— Phase 2 还有其他已规划里程碑，
-    其状态以各自文档为准。本节只声明 M6 这一里程碑的完成候选状态。
+    其状态以各自文档为准。本节只声明 M6 这一里程碑的**已批准完成状态
+    （Final Coding Gate PASS，2026-11-01）**；不涉及 Phase 2 其他里程碑。
 ```
 
 ### 26.10 文档一致性检查（本轮实际核对）
@@ -5156,26 +5209,31 @@ Phase 2 状态声明（防止误读）：
 7. §20.2 验证边界                  ：(a)(g)(i) 按实际结果更新；(f) 排除项保持不变；(b)(c)(d)(e)(h) 不变
 8. §21.3 / §21.4 验收              ：新增 C1–C7、D1–D4 的实际归档结果
 9. §22 Windows / 编码              ：Windows 仍 NOT VERIFIED；新增 Linux 门禁实测与编码处理归档
-10. §24 历史 Git / 工作区状态      ：保留 §24.1–§24.5 历史；新增 §24.6（M6.8 基线）；判定规则不变
-11. §25 下一步                     ：改为"人工最终复审 + Phase 3 交接"；R-20 前置条件逐条标注已满足
-12. §26（本节）                    ：唯一完成记录；不含"Gate = PASS"或"Phase 2 COMPLETE"的声明
+10. §24 历史 Git / 工作区状态      ：保留 §24.1–§24.8 历史；新增 §24.9（M6.8.3 基线）；判定规则不变
+11. §25 下一步                     ：M6.8 时为"人工最终复审 + Phase 3 交接"；M6.8.3 起改为
+                                    "Gate 已批准 + 最终文档归档 + Phase 3 交接准备（实现需独立授权）"
+12. §26（本节）                    ：唯一完成记录；M6.8.3 起含人工批准的 Final Coding Gate = PASS 记录（§26.12）；
+                                    仍不含"Phase 2 COMPLETE"的声明
 13. M6.8.1（已发布）               ：文首 / §1.1 / §17.1 / §18 / §21.3 / §22.1 / §24.7 与 §26.1–§26.10
                                     已按 M6.7.2 / M6.7.2a 的实际结果更新；统计修正为 **294 = 224 + 70**
 14. 历史时点区分                   ：M6.8 的"291 / +67"保留并标注为历史；CTest 轮次已按
                                     M6.7 ×3 + M6.7.1 ×1 + M6.7.2 ×2 + M6.7.2a ×1 = 7 更正归属；
                                     B29 的旧「8/8」表述已由 11 项证据取代（§26.4 末「B29 证据归档」）
-15. M6.8.2（本轮）                 ：§22.2 编码事实（CServer.h）、§18 R-20 用例数 11、
+15. M6.8.2（已发布）               ：§22.2 编码事实（CServer.h）、§18 R-20 用例数 11、
                                     §26.2 轮次归属、§21.1 A1/A3/A11/A16、§26.4 B23 证据分级、
                                     §10.3 Meeting ID 契约、§26.3 / §21.3 C3 的 C++14 口径、
                                     §26.7.2 Windows/R6 后果、§26.7.1 Class A 精度、
                                     §21.3 C6 既有 tracked 配置、§12.3.16.4 池规模不变量
                                     均已按实际源码 / 配置核对；未新增验收结论、未升级任何 NOT VERIFIED
+16. M6.8.3（本轮）                 ：文首 / §1.1 / §25 / §26.1 记录 **2026-11-01 人工批准 PASS**；
+                                    §26.2 的 M6.8.2 行更正为已发布（`b8fbbba`，仅文档 +226/−42）；
+                                    §26.12 归档 OBS-1 / OBS-2 / OBS-3；Phase 3 边界（§26.9）未改
 
 冲突扫描：文档中已无"当前状态 = Coding NOT STARTED / Gate HOLD / R-20 NOT STARTED"的现行表述；
          所有保留的此类文本均带〔M6.0.8 时点〕或"历史"标记。
 ```
 
-### 26.11 提交命令（由用户手动执行；M6.8.2 轮次未执行任何 git 写操作）
+### 26.11 提交命令（由用户手动执行；M6.8.3 轮次未执行任何 git 写操作）
 
 ```bash
 cd /home/tobeki/projects/rtc-signaling-platform
@@ -5191,8 +5249,8 @@ git add docs/phase2/M6-response-notification-adapter.md
 git diff --cached --stat
 git --no-pager diff --cached --stat
 
-# 提交与推送（M6.8.2：文档准确性更正；M6.8 的收尾提交已发布，见 §24.6）
-git commit -m "docs(phase2): correct the M6 documentation accuracy issues found by the gate audit"
+# 提交与推送（M6.8.3：Final Coding Gate 人工批准记录；M6.8.2 已发布，见 §24.9）
+git commit -m "docs(phase2): record the M6 final coding gate human approval"
 git push origin dev
 
 # 推送后校验
@@ -5200,3 +5258,59 @@ git log --oneline -1
 git status -sb
 git rev-parse HEAD origin/dev
 ```
+
+### 26.12 M6 Final Coding Gate Human Approval Record（M6.8.3）
+
+```text
+批准结论：M6 Final Coding Gate = **PASS**
+批准人  ：项目负责人
+批准日期：2026-11-01
+批准依据：M6 Final Coding Gate 最终只读复审报告
+  · C-1 ~ C-6 六项正式条件全部关闭；
+  · F-06 / F-07 / F-08 / F-13 / F-15 五项补充问题已复核；
+  · 无 BLOCKER；无 MAJOR；无影响批准的 MINOR；
+  · M6.8.2 已发布（提交 b8fbbba57eeac6fd64875ef460373aa19630a51b，
+    仅修改本文档，+226 / −42）；
+  · 复审时 Git：branch dev、HEAD == origin/dev == b8fbbba、working tree clean。
+
+批准范围与不变边界：
+  · 本批准只针对 M6 里程碑；**不**等于 Phase 2 整体 COMPLETE。
+  · M6 仍只交付 transport-neutral typed 出站值对象、Session 判活目录与逐目标产出；
+    **不**代表已实现 Meeting TCP message ID / wire format / 真实字节发送，
+    **不**代表客户端已收到 Meeting Response / Notification，
+    **不**代表已验证 L4 / L5。
+  · Phase 3 的上述实现工作仍需独立任务授权；本记录不改变 §26.9 的边界。
+
+OBS-1（A11 owner_chat_server_id 字段分类精度，非阻塞）：
+  · MeetingServiceResultCommon.owner_chat_server_id：MEETING_NOT_LOCAL 的合法例外字段
+    （§10.3 唯一允许携带异地 owner 的结果；adapter 仅在该分支读取）。
+  · MeetingView.owner_chat_server_id：受 MeetingView 授权规则约束的字段
+    （仅在 has_view == true 后随整块 view 透传，adapter 不逐字段读取）。
+  · 结论：属审查规则的描述精度问题；未发现实际未授权泄露；不阻塞批准。
+    该观察不改变 §10.3 的安全边界，也不要求修改 adapter 或消息类型。
+
+OBS-2（F-13 Redis 连接池不变量证明范围，非阻塞）：
+  · 当前实现**未发现**可达的连接池超发路径（queue 不会超过 N_initial）。
+  · 计数等式 connections_.size() + borrowed + fail_count_ == N_initial 应限定在
+    ClearConnections() **之前**的运行期；清理阶段等式不再成立，但队列只会减少。
+  · borrowed 是逻辑计数（已借出、尚未归还/丢弃的连接数），不是运行时度量。
+  · 当前结论属于**源码级归纳分析**，不是形式化并发证明；
+    **不得**升级为"绝对不存在任何并发风险"。
+  · 结论：不构成缺陷，不阻塞批准；建议未来文档轮次收紧措辞。
+
+OBS-3（M6.8.2 提交状态文字，非阻塞）：
+  · M6.8.2 文档在提交前确实记录过"本轮（待人工提交）"（§26.2 的 M6.8.2 行；
+    §24.8 同时记录当时未执行 add/commit/push）。该快照是当时真实状态；
+    后续已由项目负责人手动提交并推送。
+  · 实际发布状态以 Git 提交与远端核验为准：b8fbbba == origin/dev。
+  · 本轮（M6.8.3）已把 §26.2 的 M6.8.2 行更正为已发布记录；
+    这属于过时快照措辞的修正，不阻塞批准。
+
+Phase 3 授权范围（**仅准备**）：
+  · 已授权：技术现状盘点、架构设计、协议契约裁决（§25 / §26.9）。
+  · 未授权：Phase 3 生产代码实现、真实字节发送、TCP message ID / wire format、
+    客户端适配、L4 / L5 验证、真实端到端测试。
+  · 任何实现工作必须由项目负责人另行下达独立任务授权。
+```
+
+本节是 M6 的唯一最终批准记录；不另建第二份完成规范。
